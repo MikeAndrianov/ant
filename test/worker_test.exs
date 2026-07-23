@@ -55,6 +55,22 @@ defmodule Ant.WorkerTest do
     def calculate_delay(_worker), do: 0
   end
 
+  defmodule ThrowWorker do
+    use Ant.Worker, max_attempts: 2
+
+    def perform(_worker), do: throw(:custom_throw)
+
+    def calculate_delay(_worker), do: 0
+  end
+
+  defmodule ExitWorker do
+    use Ant.Worker, max_attempts: 2
+
+    def perform(_worker), do: exit(:custom_exit)
+
+    def calculate_delay(_worker), do: 0
+  end
+
   defmodule ExceptionWorkerHandlesExceptionWithoutMessage do
     use Ant.Worker, max_attempts: 3
 
@@ -239,6 +255,66 @@ defmodule Ant.WorkerTest do
              )
 
       assert errors |> Enum.map(& &1.attempt) |> Enum.sort() == [1, 2, 3]
+    end
+
+    test "prepares worker for retry when perform throws" do
+      {:ok, worker} =
+        %{a: 1}
+        |> ThrowWorker.build()
+        |> Ant.Workers.create_worker()
+
+      expect(Ant.Queue, :dequeue, fn worker_to_dequeue ->
+        assert worker_to_dequeue.id == worker.id
+
+        :ok
+      end)
+
+      {:ok, pid} = Worker.start_link(worker)
+
+      assert Worker.perform(pid) == :ok
+
+      ref = Process.monitor(pid)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+
+      {:ok, updated_worker} = Ant.Repo.get(:ant_workers, worker.id)
+
+      assert updated_worker.status == :retrying
+      assert updated_worker.attempts == 1
+
+      assert [error] = updated_worker.errors
+      assert error.error == "** (throw) :custom_throw"
+      assert error.stack_trace
+    end
+
+    test "prepares worker for retry when perform exits" do
+      {:ok, worker} =
+        %{a: 1}
+        |> ExitWorker.build()
+        |> Ant.Workers.create_worker()
+
+      expect(Ant.Queue, :dequeue, fn worker_to_dequeue ->
+        assert worker_to_dequeue.id == worker.id
+
+        :ok
+      end)
+
+      {:ok, pid} = Worker.start_link(worker)
+
+      assert Worker.perform(pid) == :ok
+
+      ref = Process.monitor(pid)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+
+      {:ok, updated_worker} = Ant.Repo.get(:ant_workers, worker.id)
+
+      assert updated_worker.status == :retrying
+      assert updated_worker.attempts == 1
+
+      assert [error] = updated_worker.errors
+      assert error.error == "** (exit) :custom_exit"
+      assert error.stack_trace
     end
 
     test "does not run a worker that has already exhausted its attempts" do

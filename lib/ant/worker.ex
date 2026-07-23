@@ -1,5 +1,6 @@
 defmodule Ant.Worker do
   use GenServer
+  require Logger
 
   alias Ant.Workers
 
@@ -135,6 +136,12 @@ defmodule Ant.Worker do
     rescue
       exception ->
         handle_exception(exception, __STACKTRACE__, state)
+    catch
+      # `rescue` above handles exceptions; without this clause `throw` and `exit`
+      # crash the worker process, skipping retries and leaving the job
+      # stuck in the :running status.
+      kind, value ->
+        handle_caught(kind, value, __STACKTRACE__, state)
     end
   end
 
@@ -157,51 +164,60 @@ defmodule Ant.Worker do
   # Otherwise, the worker will be stopped.
   #
   defp handle_result(error_result, state) do
-    worker = state.worker
-
     error = %{
-      attempt: worker.attempts,
+      attempt: state.worker.attempts,
       error: "Expected :ok or {:ok, _result}, but got #{inspect(error_result)}",
       stack_trace: nil,
       attempted_at: DateTime.utc_now()
     }
 
-    errors = [error | worker.errors]
-
-    if worker.attempts < worker.opts[:max_attempts] do
-      {:ok, worker} = Ant.Workers.update_worker(worker.id, %{errors: errors})
-
-      state
-      |> Map.put(:worker, worker)
-      |> prepare_for_retry()
-    else
-      {:ok, worker} = Ant.Workers.update_worker(worker.id, %{status: :failed, errors: errors})
-
-      stop_worker(worker, state)
-    end
+    record_failure(error, state)
   end
 
   defp handle_exception(exception, stack_trace, state) do
-    worker = state.worker
-    attempts = worker.attempts
-
     error = %{
-      attempt: attempts,
+      attempt: state.worker.attempts,
       error: Map.get(exception, :message, inspect(exception)),
       stack_trace: Exception.format_stacktrace(stack_trace),
       attempted_at: DateTime.utc_now()
     }
 
+    record_failure(error, state)
+  end
+
+  defp handle_caught(kind, value, stack_trace, state) do
+    error = %{
+      attempt: state.worker.attempts,
+      error: Exception.format_banner(kind, value),
+      stack_trace: Exception.format_stacktrace(stack_trace),
+      attempted_at: DateTime.utc_now()
+    }
+
+    record_failure(error, state)
+  end
+
+  defp record_failure(error, state) do
+    worker = state.worker
     errors = [error | worker.errors]
 
-    if attempts < worker.opts[:max_attempts] do
-      {:ok, worker} = Ant.Workers.update_worker(worker.id, %{errors: errors})
+    if worker.attempts < worker.opts[:max_attempts] do
+      Logger.warning(
+        "#{inspect(worker.worker_module)} (worker ##{worker.id}) failed on attempt " <>
+          "#{worker.attempts}/#{worker.opts[:max_attempts]}, will retry: #{error.error}"
+      )
+
+      {:ok, worker} = Workers.update_worker(worker.id, %{errors: errors})
 
       state
       |> Map.put(:worker, worker)
       |> prepare_for_retry()
     else
-      {:ok, worker} = Ant.Workers.update_worker(worker.id, %{status: :failed, errors: errors})
+      Logger.error(
+        "#{inspect(worker.worker_module)} (worker ##{worker.id}) failed permanently " <>
+          "after attempt #{worker.attempts}/#{worker.opts[:max_attempts]}: #{error.error}"
+      )
+
+      {:ok, worker} = Workers.update_worker(worker.id, %{status: :failed, errors: errors})
 
       stop_worker(worker, state)
     end

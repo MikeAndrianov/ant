@@ -9,9 +9,6 @@ defmodule Ant.Repo do
     end
   end
 
-  # def get_by(queryable, params) do
-  # end
-
   def all(db_table, opts \\ []) do
     db_table
     |> Ant.Database.Adapters.Mnesia.all(opts)
@@ -36,15 +33,9 @@ defmodule Ant.Repo do
     end
   end
 
-  # def update_all(queryable, params) do
-  # end
-
   def delete(db_table, id) do
     Ant.Database.Adapters.Mnesia.delete(db_table, id)
   end
-
-  # defp delete_all(queryable) do
-  # end
 
   defp to_struct(db_table, record) do
     @table_to_struct_mapping

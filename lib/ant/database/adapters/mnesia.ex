@@ -22,9 +22,6 @@ defmodule Ant.Database.Adapters.Mnesia do
     end
   end
 
-  # def get_by(db_table, params) do
-  # end
-
   def filter(db_table, params, opts \\ []) do
     table_columns = get_table_columns(db_table)
     limit = Keyword.get(opts, :limit)
@@ -114,18 +111,12 @@ defmodule Ant.Database.Adapters.Mnesia do
     end
   end
 
-  # def update_all(queryable, params) do
-  # end
-
   def delete(db_table, id) do
     with {:ok, _} <- get(db_table, id),
          {:atomic, :ok} <- :mnesia.transaction(fn -> :mnesia.delete({db_table, id}) end) do
       :ok
     end
   end
-
-  # defp delete_all(queryable) do
-  # end
 
   defp generate_id, do: :erlang.unique_integer([:positive])
 

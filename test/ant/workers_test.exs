@@ -45,16 +45,15 @@ defmodule Ant.WorkersTest do
       assert Enum.all?(result, &(&1.status == :failed))
     end
 
-    test "handles invalid limit values gracefully" do
+    test "returns no workers for non-positive limits" do
+      create_test_workers(5)
+
+      assert {:ok, []} = Workers.list_workers(%{}, limit: 0)
+      assert {:ok, []} = Workers.list_workers(%{}, limit: -1)
+    end
+
+    test "ignores non-integer limit values" do
       workers = create_test_workers(5)
-
-      assert {:ok, result} = Workers.list_workers(%{}, limit: -1)
-      assert length(result) == 5
-      assert_lists_contain_same(result, workers, equals_by: :id)
-
-      assert {:ok, result} = Workers.list_workers(%{}, limit: 0)
-      assert length(result) == 5
-      assert_lists_contain_same(result, workers, equals_by: :id)
 
       assert {:ok, result} = Workers.list_workers(%{}, limit: "invalid")
       assert length(result) == 5
@@ -78,16 +77,15 @@ defmodule Ant.WorkersTest do
       assert length(result) == 3
     end
 
-    test "handles invalid limit values gracefully" do
+    test "returns no workers for non-positive limits" do
+      create_test_workers(5)
+
+      assert {:ok, []} = Workers.list_workers(limit: 0)
+      assert {:ok, []} = Workers.list_workers(limit: -1)
+    end
+
+    test "ignores non-integer limit values" do
       workers = create_test_workers(5)
-
-      assert {:ok, result} = Workers.list_workers(limit: -1)
-      assert length(result) == 5
-      assert_lists_contain_same(result, workers, equals_by: :id)
-
-      assert {:ok, result} = Workers.list_workers(limit: 0)
-      assert length(result) == 5
-      assert_lists_contain_same(result, workers, equals_by: :id)
 
       assert {:ok, result} = Workers.list_workers(limit: "invalid")
       assert length(result) == 5
@@ -111,16 +109,15 @@ defmodule Ant.WorkersTest do
       assert length(result) == 3
     end
 
-    test "handles invalid limit values gracefully" do
+    test "returns no workers for non-positive limits" do
+      create_test_workers(5, status: :retrying)
+
+      assert {:ok, []} = Workers.list_retrying_workers(%{}, DateTime.utc_now(), limit: 0)
+      assert {:ok, []} = Workers.list_retrying_workers(%{}, DateTime.utc_now(), limit: -1)
+    end
+
+    test "ignores non-integer limit values" do
       workers = create_test_workers(5, status: :retrying)
-
-      assert {:ok, result} = Workers.list_retrying_workers(%{}, DateTime.utc_now(), limit: -1)
-      assert length(result) == 5
-      assert_lists_contain_same(result, workers, equals_by: :id)
-
-      assert {:ok, result} = Workers.list_retrying_workers(%{}, DateTime.utc_now(), limit: 0)
-      assert length(result) == 5
-      assert_lists_contain_same(result, workers, equals_by: :id)
 
       assert {:ok, result} =
                Workers.list_retrying_workers(%{}, DateTime.utc_now(), limit: "invalid")
@@ -146,16 +143,15 @@ defmodule Ant.WorkersTest do
       assert length(result) == 3
     end
 
-    test "handles invalid limit values gracefully" do
+    test "returns no workers for non-positive limits" do
+      create_test_workers(5, status: :scheduled)
+
+      assert {:ok, []} = Workers.list_scheduled_workers(%{}, DateTime.utc_now(), limit: 0)
+      assert {:ok, []} = Workers.list_scheduled_workers(%{}, DateTime.utc_now(), limit: -1)
+    end
+
+    test "ignores non-integer limit values" do
       workers = create_test_workers(5, status: :scheduled)
-
-      assert {:ok, result} = Workers.list_scheduled_workers(%{}, DateTime.utc_now(), limit: -1)
-      assert length(result) == 5
-      assert_lists_contain_same(result, workers, equals_by: :id)
-
-      assert {:ok, result} = Workers.list_scheduled_workers(%{}, DateTime.utc_now(), limit: 0)
-      assert length(result) == 5
-      assert_lists_contain_same(result, workers, equals_by: :id)
 
       assert {:ok, result} =
                Workers.list_scheduled_workers(%{}, DateTime.utc_now(), limit: "invalid")

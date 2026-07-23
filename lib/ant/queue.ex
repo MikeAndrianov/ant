@@ -138,35 +138,39 @@ defmodule Ant.Queue do
     end
   end
 
+  # Get workers in priority order: scheduled -> retrying -> enqueued.
+  # Each subsequent type gets the limit that is left over from the previous ones;
+  # once the limit is exhausted, the remaining types are skipped entirely.
+  #
   defp list_workers_to_process(queue_name, opts) do
-    # Get workers in priority order: scheduled -> retrying -> enqueued
-    # Adjust limits for each type based on previous results
-    #
-    calculate_limit = fn limit, processed_workers ->
-      limit - length(processed_workers)
-    end
+    limit = Keyword.get(opts, :limit)
 
     with {:ok, scheduled_workers} <-
            Workers.list_scheduled_workers(
              %{queue_name: queue_name},
              DateTime.utc_now(),
-             opts
+             limit: limit
            ),
-         retrying_limit = calculate_limit.(Keyword.get(opts, :limit), scheduled_workers),
-         {:ok, retrying_workers} <-
-           Workers.list_retrying_workers(
-             %{queue_name: queue_name},
-             DateTime.utc_now(),
-             Keyword.put(opts, :limit, retrying_limit)
-           ),
-         enqueued_limit = calculate_limit.(retrying_limit, retrying_workers),
-         {:ok, enqueued_workers} <-
-           Workers.list_workers(
-             %{queue_name: queue_name, status: :enqueued},
-             Keyword.put(opts, :limit, enqueued_limit)
-           ) do
+         retrying_limit = remaining_limit(limit, scheduled_workers),
+         {:ok, retrying_workers} <- fetch_retrying_workers(queue_name, retrying_limit),
+         enqueued_limit = remaining_limit(retrying_limit, retrying_workers),
+         {:ok, enqueued_workers} <- fetch_enqueued_workers(queue_name, enqueued_limit) do
       {:ok, scheduled_workers ++ retrying_workers ++ enqueued_workers}
     end
+  end
+
+  defp remaining_limit(limit, workers), do: max(limit - length(workers), 0)
+
+  defp fetch_retrying_workers(_queue_name, 0), do: {:ok, []}
+
+  defp fetch_retrying_workers(queue_name, limit) do
+    Workers.list_retrying_workers(%{queue_name: queue_name}, DateTime.utc_now(), limit: limit)
+  end
+
+  defp fetch_enqueued_workers(_queue_name, 0), do: {:ok, []}
+
+  defp fetch_enqueued_workers(queue_name, limit) do
+    Workers.list_workers(%{queue_name: queue_name, status: :enqueued}, limit: limit)
   end
 
   defp schedule_check(state), do: schedule_check(state, state.check_interval)

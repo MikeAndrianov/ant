@@ -131,5 +131,6 @@ defmodule Ant.Database.Adapters.Mnesia do
   end
 
   defp maybe_limit(list, limit) when is_integer(limit) and limit > 0, do: Enum.take(list, limit)
+  defp maybe_limit(_list, limit) when is_integer(limit), do: []
   defp maybe_limit(list, _), do: list
 end

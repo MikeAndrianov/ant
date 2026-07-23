@@ -108,10 +108,17 @@ defmodule Ant.RepoTest do
       assert length(result) == 2
     end
 
-    test "handles invalid limit value" do
+    test "returns no records for non-positive limits" do
+      create_test_records(2)
+
+      assert Repo.filter(:ant_workers, %{}, limit: 0) == []
+      assert Repo.filter(:ant_workers, %{}, limit: -1) == []
+    end
+
+    test "ignores non-integer limit values" do
       records = create_test_records(2)
 
-      result = Repo.filter(:ant_workers, %{}, limit: -1)
+      result = Repo.filter(:ant_workers, %{}, limit: "invalid")
 
       assert length(result) == 2
       assert_lists_contain_same(result, records, :id)

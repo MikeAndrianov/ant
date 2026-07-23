@@ -11,6 +11,12 @@ defmodule Ant.WorkersTest do
     def perform(_worker), do: :ok
   end
 
+  defmodule UniqueTestWorker do
+    use Ant.Worker, unique: [args: [:email]]
+
+    def perform(_worker), do: :ok
+  end
+
   setup :set_mimic_global
   setup :verify_on_exit!
 
@@ -197,12 +203,6 @@ defmodule Ant.WorkersTest do
     end
 
     test "calls uniqueness checker with worker containing unique config" do
-      defmodule UniqueTestWorker do
-        use Ant.Worker, unique: [args: [:email]]
-
-        def perform(_worker), do: :ok
-      end
-
       worker = UniqueTestWorker.build(%{email: "test@example.com"})
 
       expect(WorkerUniquenessChecker, :call, fn worker_arg ->

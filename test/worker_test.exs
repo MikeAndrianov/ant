@@ -46,6 +46,33 @@ defmodule Ant.WorkerTest do
     def calculate_delay(_worker), do: 0
   end
 
+  defmodule FailOnceWorker do
+    use Ant.Worker, max_attempts: 3
+
+    def perform(%{attempts: 1}), do: :error
+    def perform(_worker), do: :ok
+
+    def calculate_delay(_worker), do: 0
+  end
+
+  defmodule ExceptionWorkerHandlesExceptionWithoutMessage do
+    use Ant.Worker, max_attempts: 3
+
+    def perform(_worker), do: whoops(%{status: :error})
+
+    def calculate_delay(_worker), do: 0
+
+    defp whoops(%{status: :ok}) do
+      nil
+    end
+  end
+
+  defmodule TestWorkerWithQueueName do
+    use Ant.Worker, queue: "test_queue"
+
+    def perform(_worker), do: :ok
+  end
+
   describe "start_link/1" do
     test "accepts worker struct on start" do
       assert {:ok, _pid} = Worker.start_link(%Worker{})
@@ -87,26 +114,16 @@ defmodule Ant.WorkerTest do
       ref = Process.monitor(pid)
 
       # Wait for the process to finish its work
-      receive do
-        {:DOWN, ^ref, :process, ^pid, _reason} ->
-          {:ok, updated_worker} = Ant.Repo.get(:ant_workers, worker.id)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
 
-          assert updated_worker.status == :completed
-          assert updated_worker.attempts == 1
-          assert updated_worker.errors == []
-      end
+      {:ok, updated_worker} = Ant.Repo.get(:ant_workers, worker.id)
+
+      assert updated_worker.status == :completed
+      assert updated_worker.attempts == 1
+      assert updated_worker.errors == []
     end
 
     test "prepares worker for retry if it fails" do
-      defmodule FailOnceWorker do
-        use Ant.Worker, max_attempts: 3
-
-        def perform(%{attempts: 1}), do: :error
-        def perform(_worker), do: :ok
-
-        def calculate_delay(_worker), do: 0
-      end
-
       {:ok, worker} =
         %{a: 1}
         |> FailOnceWorker.build()
@@ -124,20 +141,19 @@ defmodule Ant.WorkerTest do
 
       ref = Process.monitor(pid)
 
-      receive do
-        {:DOWN, ^ref, :process, ^pid, _reason} ->
-          {:ok, updated_worker} = Ant.Repo.get(:ant_workers, worker.id)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
 
-          assert updated_worker.status == :retrying
-          assert updated_worker.attempts == 1
-          assert updated_worker.scheduled_at
-          assert updated_worker.updated_at
+      {:ok, updated_worker} = Ant.Repo.get(:ant_workers, worker.id)
 
-          assert [error] = updated_worker.errors
-          assert error.error == "Expected :ok or {:ok, _result}, but got :error"
-          assert error.attempt == 1
-          refute error.stack_trace
-      end
+      assert updated_worker.status == :retrying
+      assert updated_worker.attempts == 1
+      assert updated_worker.scheduled_at
+      assert updated_worker.updated_at
+
+      assert [error] = updated_worker.errors
+      assert error.error == "Expected :ok or {:ok, _result}, but got :error"
+      assert error.attempt == 1
+      refute error.stack_trace
     end
 
     test "stops retrying if reached max attempts" do
@@ -161,15 +177,14 @@ defmodule Ant.WorkerTest do
 
       ref = Process.monitor(pid)
 
-      receive do
-        {:DOWN, ^ref, :process, ^pid, _reason} ->
-          {:ok, updated_worker} = Ant.Repo.get(:ant_workers, worker.id)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
 
-          assert length(updated_worker.errors) == 3
-          assert updated_worker.status == :failed
-          assert updated_worker.attempts == 3
-          assert is_nil(updated_worker.scheduled_at)
-      end
+      {:ok, updated_worker} = Ant.Repo.get(:ant_workers, worker.id)
+
+      assert length(updated_worker.errors) == 3
+      assert updated_worker.status == :failed
+      assert updated_worker.attempts == 3
+      assert is_nil(updated_worker.scheduled_at)
     end
 
     test "handles exceptions gracefully and updates worker" do
@@ -207,39 +222,26 @@ defmodule Ant.WorkerTest do
 
       ref = Process.monitor(pid)
 
-      receive do
-        {:DOWN, ^ref, :process, ^pid, _reason} ->
-          {:ok, updated_worker} = Ant.Repo.get(:ant_workers, worker.id)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
 
-          assert updated_worker.status == :failed
-          assert updated_worker.attempts == 3
+      {:ok, updated_worker} = Ant.Repo.get(:ant_workers, worker.id)
 
-          errors = updated_worker.errors
+      assert updated_worker.status == :failed
+      assert updated_worker.attempts == 3
 
-          assert Enum.all?(errors, &(&1.error == "Custom exception!"))
+      errors = updated_worker.errors
 
-          assert Enum.all?(
-                   errors,
-                   &(&1.stack_trace =~ "Ant.WorkerTest.ExceptionWorker.perform/1")
-                 )
+      assert Enum.all?(errors, &(&1.error == "Custom exception!"))
 
-          assert errors |> Enum.map(& &1.attempt) |> Enum.sort() == [1, 2, 3]
-      end
+      assert Enum.all?(
+               errors,
+               &(&1.stack_trace =~ "Ant.WorkerTest.ExceptionWorker.perform/1")
+             )
+
+      assert errors |> Enum.map(& &1.attempt) |> Enum.sort() == [1, 2, 3]
     end
 
     test "handles exceptions without message gracefully" do
-      defmodule ExceptionWorkerHandlesExceptionWithoutMessage do
-        use Ant.Worker, max_attempts: 3
-
-        def perform(_worker), do: whoops(%{status: :error})
-
-        def calculate_delay(_worker), do: 0
-
-        defp whoops(%{status: :ok}) do
-          nil
-        end
-      end
-
       {:ok, worker} =
         %{a: 1}
         |> ExceptionWorkerHandlesExceptionWithoutMessage.build()
@@ -257,32 +259,25 @@ defmodule Ant.WorkerTest do
 
       ref = Process.monitor(pid)
 
-      receive do
-        {:DOWN, ^ref, :process, ^pid, _reason} ->
-          {:ok, updated_worker} = Ant.Repo.get(:ant_workers, worker.id)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
 
-          assert updated_worker.status == :retrying
-          assert updated_worker.attempts == 1
-          assert updated_worker.scheduled_at
-          assert updated_worker.updated_at
+      {:ok, updated_worker} = Ant.Repo.get(:ant_workers, worker.id)
 
-          assert [error] = updated_worker.errors
+      assert updated_worker.status == :retrying
+      assert updated_worker.attempts == 1
+      assert updated_worker.scheduled_at
+      assert updated_worker.updated_at
 
-          assert error.error ==
-                   "%FunctionClauseError{module: Ant.WorkerTest.ExceptionWorkerHandlesExceptionWithoutMessage, function: :whoops, arity: 1, kind: nil, args: nil, clauses: nil}"
+      assert [error] = updated_worker.errors
 
-          assert error.attempt == 1
-      end
+      assert error.error ==
+               "%FunctionClauseError{module: Ant.WorkerTest.ExceptionWorkerHandlesExceptionWithoutMessage, function: :whoops, arity: 1, kind: nil, args: nil, clauses: nil}"
+
+      assert error.attempt == 1
     end
   end
 
   describe "build/2" do
-    defmodule TestWorkerWithQueueName do
-      use Ant.Worker, queue: "test_queue"
-
-      def perform(_worker), do: :ok
-    end
-
     test "uses provided queue name" do
       worker = TestWorkerWithQueueName.build(%{key: :value})
 
@@ -319,12 +314,11 @@ defmodule Ant.WorkerTest do
 
     ref = Process.monitor(pid)
 
-    receive do
-      {:DOWN, ^ref, :process, ^pid, _reason} ->
-        {:ok, updated_worker} = Ant.Repo.get(:ant_workers, worker.id)
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
 
-        assert updated_worker.status == :failed
-        assert updated_worker.attempts == 1
-    end
+    {:ok, updated_worker} = Ant.Repo.get(:ant_workers, worker.id)
+
+    assert updated_worker.status == :failed
+    assert updated_worker.attempts == 1
   end
 end

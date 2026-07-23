@@ -115,6 +115,26 @@ defmodule Ant.WorkersTest do
       assert length(result) == 3
     end
 
+    test "returns the workers scheduled earliest when limit is specified" do
+      now = DateTime.utc_now()
+
+      [_w1, w2, _w3, w4] =
+        create_scheduled_test_workers(:retrying, now, [-10, -40, -20, -30])
+
+      assert {:ok, result} = Workers.list_retrying_workers(%{}, now, limit: 2)
+      assert Enum.map(result, & &1.id) == [w2.id, w4.id]
+    end
+
+    test "workers scheduled in the future do not consume the limit" do
+      now = DateTime.utc_now()
+
+      [_future1, _future2, due1, due2] =
+        create_scheduled_test_workers(:retrying, now, [60, 120, -20, -10])
+
+      assert {:ok, result} = Workers.list_retrying_workers(%{}, now, limit: 2)
+      assert Enum.map(result, & &1.id) == [due1.id, due2.id]
+    end
+
     test "returns no workers for non-positive limits" do
       create_test_workers(5, status: :retrying)
 
@@ -147,6 +167,26 @@ defmodule Ant.WorkersTest do
 
       assert {:ok, result} = Workers.list_scheduled_workers(%{}, DateTime.utc_now(), limit: 3)
       assert length(result) == 3
+    end
+
+    test "returns the workers scheduled earliest when limit is specified" do
+      now = DateTime.utc_now()
+
+      [_w1, w2, _w3, w4] =
+        create_scheduled_test_workers(:scheduled, now, [-10, -40, -20, -30])
+
+      assert {:ok, result} = Workers.list_scheduled_workers(%{}, now, limit: 2)
+      assert Enum.map(result, & &1.id) == [w2.id, w4.id]
+    end
+
+    test "workers scheduled in the future do not consume the limit" do
+      now = DateTime.utc_now()
+
+      [_future1, _future2, due1, due2] =
+        create_scheduled_test_workers(:scheduled, now, [60, 120, -20, -10])
+
+      assert {:ok, result} = Workers.list_scheduled_workers(%{}, now, limit: 2)
+      assert Enum.map(result, & &1.id) == [due1.id, due2.id]
     end
 
     test "returns no workers for non-positive limits" do
@@ -225,6 +265,23 @@ defmodule Ant.WorkersTest do
         |> Workers.create_worker()
 
       {:ok, worker} = Workers.update_worker(worker.id, %{status: status})
+      worker
+    end)
+  end
+
+  defp create_scheduled_test_workers(status, date_time, offsets_in_seconds) do
+    Enum.map(offsets_in_seconds, fn offset ->
+      {:ok, worker} =
+        %{offset: offset}
+        |> TestWorker.build()
+        |> Workers.create_worker()
+
+      {:ok, worker} =
+        Workers.update_worker(worker.id, %{
+          status: status,
+          scheduled_at: DateTime.add(date_time, offset, :second)
+        })
+
       worker
     end)
   end

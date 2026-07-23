@@ -39,13 +39,7 @@ defmodule Ant.Worker do
   @default_retry_delay 10_000
 
   defmacro __using__(opts) do
-    queue_name =
-      Keyword.get(
-        opts,
-        :queue,
-        List.first(Application.get_env(:ant, :queues, ["default"]))
-      )
-
+    queue_name = Keyword.get(opts, :queue)
     max_attempts = Keyword.get(opts, :max_attempts, @default_max_attempts)
     unique = Keyword.get(opts, :unique, [])
 
@@ -69,7 +63,7 @@ defmodule Ant.Worker do
         %Ant.Worker{
           worker_module: __MODULE__,
           args: args,
-          queue_name: unquote(queue_name),
+          queue_name: unquote(queue_name) || Ant.Worker.default_queue_name(),
           status: :enqueued,
           attempts: 0,
           scheduled_at: DateTime.utc_now(),
@@ -77,6 +71,18 @@ defmodule Ant.Worker do
           opts: opts
         }
       end
+    end
+  end
+
+  # Returns the name of the first queue from the configuration.
+  # Queues can be configured as a keyword list (`[default: [concurrency: 5]]`)
+  # or as a plain list of names (`["default"]`).
+  #
+  def default_queue_name do
+    case Application.get_env(:ant, :queues) do
+      [{queue_name, _config} | _] -> queue_name
+      [queue_name | _] -> queue_name
+      _ -> "default"
     end
   end
 

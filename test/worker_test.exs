@@ -393,6 +393,39 @@ defmodule Ant.WorkerTest do
 
       assert worker.queue_name == "test_queue"
     end
+
+    test "falls back to the default queue when no queues are configured" do
+      worker = MyTestWorker.build(%{key: :value})
+
+      assert worker.queue_name == "default"
+    end
+
+    test "uses the first queue from keyword-style configuration" do
+      Application.put_env(:ant, :queues, high_priority: [concurrency: 10], low_priority: [])
+      on_exit(fn -> Application.delete_env(:ant, :queues) end)
+
+      worker = MyTestWorker.build(%{key: :value})
+
+      assert worker.queue_name == :high_priority
+    end
+
+    test "uses the first queue from plain list configuration" do
+      Application.put_env(:ant, :queues, ["mailers", "events"])
+      on_exit(fn -> Application.delete_env(:ant, :queues) end)
+
+      worker = MyTestWorker.build(%{key: :value})
+
+      assert worker.queue_name == "mailers"
+    end
+
+    test "explicit queue name wins over configuration" do
+      Application.put_env(:ant, :queues, high_priority: [concurrency: 10])
+      on_exit(fn -> Application.delete_env(:ant, :queues) end)
+
+      worker = TestWorkerWithQueueName.build(%{key: :value})
+
+      assert worker.queue_name == "test_queue"
+    end
   end
 
   test "allows to set max_attempts" do

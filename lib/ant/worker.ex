@@ -97,20 +97,28 @@ defmodule Ant.Worker do
     {:ok, state}
   end
 
-  def handle_cast(
-        :perform,
-        %{worker: %{attempts: attempts, opts: [max_attempts: max_attempts]}} = state
-      )
-      when attempts >= max_attempts do
-    stop_worker(state.worker, state)
+  def handle_cast(:perform, %{worker: worker} = state) do
+    max_attempts = worker.opts[:max_attempts]
+
+    if is_integer(worker.attempts) and is_integer(max_attempts) and
+         worker.attempts >= max_attempts do
+      # The worker has already exhausted its attempts
+      # (e.g. it was recovered in a stuck state after an application restart)
+      # and must not run again.
+      {:ok, worker} = Workers.update_worker(worker.id, %{status: :failed})
+
+      stop_worker(worker, state)
+    else
+      run(state)
+    end
   end
 
-  def handle_cast(:perform, state) do
+  defp run(state) do
     worker = state.worker
 
     # Status is already set to :running by Queue.run_worker/1
     {:ok, worker} =
-      Ant.Workers.update_worker(
+      Workers.update_worker(
         worker.id,
         %{
           scheduled_at: nil,

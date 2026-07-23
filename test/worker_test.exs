@@ -241,6 +241,40 @@ defmodule Ant.WorkerTest do
       assert errors |> Enum.map(& &1.attempt) |> Enum.sort() == [1, 2, 3]
     end
 
+    test "does not run a worker that has already exhausted its attempts" do
+      # E.g. a stuck :running worker recovered after an application restart.
+      #
+      worker_params =
+        %{a: 1}
+        |> WorkerWithMaxAttempts.build()
+        |> Map.merge(%{attempts: 1, status: :running})
+        |> Map.from_struct()
+
+      {:ok, worker} = Ant.Repo.insert(:ant_workers, worker_params)
+
+      expect(Ant.Queue, :dequeue, fn worker_to_dequeue ->
+        assert worker_to_dequeue.id == worker.id
+
+        :ok
+      end)
+
+      {:ok, pid} = Worker.start_link(worker)
+
+      assert Worker.perform(pid) == :ok
+
+      ref = Process.monitor(pid)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+
+      {:ok, updated_worker} = Ant.Repo.get(:ant_workers, worker.id)
+
+      # WorkerWithMaxAttempts.perform/1 raises, so no new error means
+      # perform was never called.
+      assert updated_worker.status == :failed
+      assert updated_worker.attempts == 1
+      assert updated_worker.errors == []
+    end
+
     test "handles exceptions without message gracefully" do
       {:ok, worker} =
         %{a: 1}

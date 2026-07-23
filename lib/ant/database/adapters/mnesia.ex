@@ -70,7 +70,7 @@ defmodule Ant.Database.Adapters.Mnesia do
       Enum.map(
         table_columns,
         fn
-          :id -> generate_id()
+          :id -> generate_id(db_table)
           :updated_at -> DateTime.utc_now()
           column -> params[column]
         end
@@ -118,7 +118,7 @@ defmodule Ant.Database.Adapters.Mnesia do
     end
   end
 
-  defp generate_id, do: :erlang.unique_integer([:positive])
+  defp generate_id(db_table), do: :mnesia.dirty_update_counter(:ant_counters, db_table, 1)
 
   defp get_table_columns(db_table), do: :mnesia.table_info(db_table, :attributes)
 

@@ -15,16 +15,11 @@ defmodule MnesiaTesting do
     end
   end
 
+  # Tables are created by Ant.Application when the app starts.
+  #
   def prepare do
     :ok = :mnesia.start()
-
-    unless :mnesia.table_info(:ant_workers, :attributes) do
-      :mnesia.create_table(:ant_workers,
-        attributes: [:id, :worker_module, :queue_name, :status, :args, :attempts, :errors, :opts]
-      )
-
-      :mnesia.wait_for_tables([:ant_workers], 5000)
-    end
+    :ok = :mnesia.wait_for_tables([:ant_workers, :ant_counters], 5000)
 
     clear_db()
   end

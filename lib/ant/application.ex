@@ -105,7 +105,55 @@ defmodule Ant.Application do
       ] ++ persistence_options
     )
 
-    # end
+    :mnesia.create_table(
+      :ant_counters,
+      [attributes: [:table_name, :count], type: :set] ++ persistence_options
+    )
+
+    ensure_tables_available!()
+    initialize_id_counter()
+  end
+
+  # With disc persistence, tables load asynchronously after `:mnesia.start/0`;
+  # without waiting, queues could query a table that is not loaded yet.
+  # A timeout here also surfaces table-creation failures that would otherwise
+  # silently leave the data in a RAM-only table.
+  #
+  defp ensure_tables_available! do
+    case :mnesia.wait_for_tables([:ant_workers, :ant_counters], :timer.seconds(15)) do
+      :ok ->
+        :ok
+
+      error ->
+        raise "Ant could not load its Mnesia tables: #{inspect(error)}. " <>
+                "Check the :ant database configuration (persistence_strategy, persistence_dir)."
+    end
+  end
+
+  # Worker IDs come from a persisted counter.
+  # For databases created by older versions (random IDs), start the counter
+  # above any already-persisted ID to avoid collisions.
+  #
+  defp initialize_id_counter do
+    {:atomic, _} =
+      :mnesia.transaction(fn ->
+        case :mnesia.read({:ant_counters, :ant_workers}) do
+          [] ->
+            max_id =
+              :mnesia.foldl(
+                fn record, acc -> record |> elem(1) |> max(acc) end,
+                0,
+                :ant_workers
+              )
+
+            :mnesia.write({:ant_counters, :ant_workers, max_id})
+
+          _ ->
+            :ok
+        end
+      end)
+
+    :ok
   end
 
   defp validate_mnesia_disc_copies_config do

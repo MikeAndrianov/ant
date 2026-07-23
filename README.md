@@ -139,6 +139,17 @@ config :ant,
   ]
 ```
 
+### Testing
+
+By default queues start with the application and immediately pick up enqueued jobs. In your test environment you may want to enqueue and inspect workers without them being run in the background:
+
+```elixir
+# config/test.exs
+config :ant, start_queues: false
+```
+
+With this setting no queues (and no database cleaner) are started; start `Ant.Queue` manually in tests that need it.
+
 ### Job Uniqueness
 
 By default, it's allowed to enqueue multiple jobs with identical arguments. You can prevent insertion of duplicated jobs by configuring uniqueness constraints based on job arguments:

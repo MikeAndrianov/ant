@@ -3,30 +3,33 @@ defmodule Ant.Application do
 
   use Application
 
-  @mix_env Mix.env()
-
   @impl true
   def start(_type, _args) do
     start_database()
 
     opts = [strategy: :one_for_one, name: Ant.Supervisor]
-    Supervisor.start_link(children(@mix_env), opts)
+    Supervisor.start_link(children(), opts)
   end
 
-  def children(:test) do
-    # For test env does not start Ant.Queue GenServer
-    # because it automatically pick ups workers from the database and runs them,
-    # changing their state.
-    # It affects the tests that rely on the state of the workers.
-    # Ant.Queue should be started and stopped manually where needed.
-    #
-    [
+  def children do
+    base_children = [
       {Registry, keys: :unique, name: Ant.QueueRegistry},
       {DynamicSupervisor, name: Ant.WorkersSupervisor, strategy: :one_for_one}
     ]
+
+    # `start_queues: false` allows enqueuing and inspecting workers without
+    # queues picking them up and running them in the background.
+    # Useful in tests that rely on the state of the workers;
+    # Ant.Queue can be started and stopped manually where needed.
+    #
+    if Application.get_env(:ant, :start_queues, true) do
+      base_children ++ [{Ant.DatabaseCleaner, []} | queue_children()]
+    else
+      base_children
+    end
   end
 
-  def children(_env) do
+  defp queue_children do
     default_queues = [
       default: [
         concurrency: 5,
@@ -36,18 +39,11 @@ defmodule Ant.Application do
 
     queues = Application.get_env(:ant, :queues, default_queues)
 
-    queue_children =
-      Enum.map(queues, fn {queue_name, queue_config} ->
-        Supervisor.child_spec({Ant.Queue, queue: queue_name, config: queue_config},
-          id: {:ant_queue, queue_name}
-        )
-      end)
-
-    [
-      {Registry, keys: :unique, name: Ant.QueueRegistry},
-      {DynamicSupervisor, name: Ant.WorkersSupervisor, strategy: :one_for_one},
-      {Ant.DatabaseCleaner, []}
-    ] ++ queue_children
+    Enum.map(queues, fn {queue_name, queue_config} ->
+      Supervisor.child_spec({Ant.Queue, queue: queue_name, config: queue_config},
+        id: {:ant_queue, queue_name}
+      )
+    end)
   end
 
   defp start_database do

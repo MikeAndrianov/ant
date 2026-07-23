@@ -20,7 +20,7 @@ defmodule Ant.Worker do
   @type t :: %Ant.Worker{
           id: non_neg_integer(),
           worker_module: module(),
-          queue_name: String.t(),
+          queue_name: atom() | String.t(),
           args: map(),
           status:
             :enqueued | :running | :scheduled | :completed | :failed | :retrying | :cancelled,

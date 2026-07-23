@@ -21,7 +21,8 @@ defmodule Ant.Queue do
   end
 
   def set_concurrency(queue_name, concurrency)
-      when is_binary(queue_name) and is_integer(concurrency) do
+      when (is_binary(queue_name) or is_atom(queue_name)) and is_integer(concurrency) and
+             concurrency > 0 do
     GenServer.call(get_tuple_identifier(queue_name), {:set_concurrency, concurrency})
   end
 

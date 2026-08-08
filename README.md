@@ -9,7 +9,7 @@ Add `ant` to your list of dependencies in `mix.exs` and run `mix deps.get` to in
 ```elixir
 def deps do
   [
-    {:ant, "~> 0.1.0"}
+    {:ant, "~> 1.0"}
   ]
 end
 ```

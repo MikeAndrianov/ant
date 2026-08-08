@@ -238,6 +238,24 @@ end
 - If any specified unique attribute is missing (`nil`) from the job arguments, uniqueness checking is bypassed
 - Only jobs with all specified unique attributes present will be considered for duplicate detection
 
+## Security
+
+### Don't put secrets in job arguments
+
+Job arguments and error stack traces are stored as they are. With `:disc_copies` or `:disc_only_copies` they're written to disk unencrypted, and failed jobs are kept for the retention period (2 weeks by default), so anything in `args` outlives the job itself.
+
+Pass a reference instead of the secret — a user id rather than a password reset token, a record id rather than the card details — and look it up inside `perform/1`.
+
+### Protect Erlang distribution
+
+Mnesia has no authentication of its own: any node that can reach the Erlang distribution port with the right cookie can read and write the jobs table directly. That means it can read every job's arguments, and enqueue jobs of its own.
+
+`ant` will only run a job whose `worker_module` implements the `Ant.Worker` behaviour, so a written-in row can't make it call an arbitrary `perform/1` in your release, but that is a last line of defence, not a substitute for:
+
+- a strong, secret cookie that isn't shared across environments;
+- binding distribution to a private interface (`inet_dist_use_interface`) or firewalling the port;
+- TLS for distribution when nodes talk across an untrusted network.
+
 ## Operations with Workers
 
 1. `Ant.Workers.list_workers()` - returns a list of all workers

@@ -108,19 +108,67 @@ defmodule Ant.Worker do
   end
 
   def handle_cast(:perform, %{worker: worker} = state) do
+    cond do
+      not ant_worker?(worker.worker_module) ->
+        reject(
+          state,
+          "#{inspect(worker.worker_module)} does not implement the Ant.Worker behaviour"
+        )
+
+      attempts_exhausted?(worker) ->
+        # The worker has already exhausted its attempts
+        # (e.g. it was recovered in a stuck state after an application restart)
+        # and must not run again.
+        {:ok, worker} = Workers.update_worker(worker.id, %{status: :failed})
+
+        {:stop, :normal, %{state | worker: worker}}
+
+      true ->
+        run(state)
+    end
+  end
+
+  defp attempts_exhausted?(worker) do
     max_attempts = worker.opts[:max_attempts]
 
-    if is_integer(worker.attempts) and is_integer(max_attempts) and
-         worker.attempts >= max_attempts do
-      # The worker has already exhausted its attempts
-      # (e.g. it was recovered in a stuck state after an application restart)
-      # and must not run again.
-      {:ok, worker} = Workers.update_worker(worker.id, %{status: :failed})
+    is_integer(worker.attempts) and is_integer(max_attempts) and worker.attempts >= max_attempts
+  end
 
-      {:stop, :normal, %{state | worker: worker}}
-    else
-      run(state)
-    end
+  # The module to call comes from the database, and Mnesia has no
+  # authentication: anything able to write a row - any node that has the cookie
+  # - could otherwise get Ant to call any perform/1 in the release.
+  #
+  defp ant_worker?(module) do
+    is_atom(module) and not is_nil(module) and Code.ensure_loaded?(module) and
+      function_exported?(module, :perform, 1) and
+      Ant.Worker in behaviours(module)
+  end
+
+  defp behaviours(module) do
+    module.__info__(:attributes)
+    |> Keyword.get_values(:behaviour)
+    |> List.flatten()
+  end
+
+  # A job that is not runnable at all is failed rather than retried: it would
+  # fail the same way on every attempt.
+  #
+  defp reject(state, reason) do
+    worker = state.worker
+
+    Logger.error("Ant refused to run worker ##{worker.id}: #{reason}.")
+
+    error = %{
+      attempt: worker.attempts,
+      error: reason,
+      stack_trace: nil,
+      attempted_at: DateTime.utc_now()
+    }
+
+    {:ok, worker} =
+      Workers.update_worker(worker.id, %{status: :failed, errors: [error | worker.errors]})
+
+    {:stop, :normal, %{state | worker: worker}}
   end
 
   defp run(state) do

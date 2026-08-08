@@ -351,6 +351,60 @@ defmodule Ant.WorkerTest do
     end
   end
 
+  describe "worker module verification" do
+    # Not an Ant.Worker, but shaped like one.
+    #
+    defmodule ImposterWorker do
+      def perform(worker), do: send(worker.args.test_pid, :performed)
+    end
+
+    test "refuses to run a module that does not implement the behaviour" do
+      worker_params =
+        %{test_pid: self()}
+        |> MyTestWorker.build()
+        |> Map.put(:worker_module, ImposterWorker)
+        |> Map.from_struct()
+
+      {:ok, worker} = Ant.Repo.insert(:ant_workers, worker_params)
+
+      {:ok, pid} = Worker.start_link(worker)
+      ref = Process.monitor(pid)
+
+      assert Worker.perform(pid) == :ok
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+
+      refute_received :performed
+
+      {:ok, updated_worker} = Ant.Repo.get(:ant_workers, worker.id)
+
+      assert updated_worker.status == :failed
+      assert updated_worker.attempts == 0
+
+      assert [error] = updated_worker.errors
+      assert error.error =~ "does not implement the Ant.Worker behaviour"
+    end
+
+    test "refuses to run a module that does not exist" do
+      worker_params =
+        %{}
+        |> MyTestWorker.build()
+        |> Map.put(:worker_module, :"Elixir.NoSuchWorkerModule")
+        |> Map.from_struct()
+
+      {:ok, worker} = Ant.Repo.insert(:ant_workers, worker_params)
+
+      {:ok, pid} = Worker.start_link(worker)
+      ref = Process.monitor(pid)
+
+      assert Worker.perform(pid) == :ok
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+
+      {:ok, updated_worker} = Ant.Repo.get(:ant_workers, worker.id)
+
+      assert updated_worker.status == :failed
+    end
+  end
+
   describe "timeouts" do
     test "gives up on a job that runs longer than its timeout and retries it" do
       {:ok, worker} =

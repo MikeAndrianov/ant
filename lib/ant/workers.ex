@@ -2,8 +2,9 @@ defmodule Ant.Workers do
   @moduledoc """
   Reading and writing the jobs Ant stores.
 
-  `Ant.Worker.perform_async/2` is the usual way to create a job; the functions
-  here are for inspecting and managing the ones already created.
+  The `perform_async/2` that `Ant.Worker` defines on your worker module is the
+  usual way to create a job; the functions here are for inspecting and managing
+  the ones already created.
   """
 
   alias Ant.Repo

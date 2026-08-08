@@ -51,6 +51,10 @@ defmodule Ant.MixProject do
 
   defp package do
     [
+      # Listed explicitly: the default set includes priv/, which holds the
+      # local Dialyzer PLT.
+      #
+      files: ["lib", "mix.exs", "README.md", "CHANGELOG.md", ".formatter.exs"],
       licenses: ["MIT"],
       links: %{"GitHub" => "https://github.com/MikeAndrianov/ant"}
     ]

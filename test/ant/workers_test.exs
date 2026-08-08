@@ -220,13 +220,17 @@ defmodule Ant.WorkersTest do
       assert Enum.map(result, & &1.id) == workers |> Enum.map(& &1.id) |> Enum.take(3)
     end
 
-    test "returns the workers scheduled earliest first" do
+    test "orders by id rather than by scheduled_at" do
+      # An enqueued worker's scheduled_at is the moment it was created, so id
+      # order is creation order. Ordering by id is what lets the limit be
+      # applied by the query rather than after sorting the whole backlog.
+      #
       now = DateTime.utc_now()
 
-      [_w1, w2, _w3, w4] = create_scheduled_test_workers(:enqueued, now, [-10, -40, -20, -30])
+      [w1, w2, _w3, _w4] = create_scheduled_test_workers(:enqueued, now, [-10, -40, -20, -30])
 
       assert {:ok, result} = Workers.list_enqueued_workers(%{}, now, limit: 2)
-      assert Enum.map(result, & &1.id) == [w2.id, w4.id]
+      assert Enum.map(result, & &1.id) == [w1.id, w2.id]
     end
 
     test "does not return workers scheduled in the future" do

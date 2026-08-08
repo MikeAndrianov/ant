@@ -74,9 +74,20 @@ defmodule Ant.Workers do
   def list_scheduled_workers(clauses, date_time \\ DateTime.utc_now(), opts \\ []),
     do: list_due_workers(clauses, :scheduled, date_time, opts)
 
+  # Unlike the scheduled and retrying ones, enqueued workers are ordered by id
+  # rather than by scheduled_at - and ids come from a sequential counter, so
+  # that is the order they were created in. The database returns them in that
+  # order already, which is what lets the limit be applied by the query instead
+  # of after sorting: the enqueued workers are the backlog, and there can be
+  # hundreds of thousands of them.
+  #
   @spec list_enqueued_workers(map(), DateTime.t(), keyword()) :: {:ok, [Ant.Worker.t()]}
-  def list_enqueued_workers(clauses, date_time \\ DateTime.utc_now(), opts \\ []),
-    do: list_due_workers(clauses, :enqueued, date_time, opts)
+  def list_enqueued_workers(clauses, date_time \\ DateTime.utc_now(), opts \\ []) do
+    with {:ok, workers} <-
+           list_workers(Map.put(clauses, :status, :enqueued), limit: Keyword.get(opts, :limit)) do
+      {:ok, Enum.filter(workers, &due?(&1, date_time))}
+    end
+  end
 
   # Only the columns needed to decide whether a worker can be removed, so a
   # cleanup pass does not have to load every job's args and stack traces.

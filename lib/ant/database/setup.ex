@@ -27,19 +27,24 @@ defmodule Ant.Database.Setup do
         :errors,
         :opts
       ],
-      type: :set,
       # Queues look workers up by status, the uniqueness checker by module.
       # Without these every lookup scans the whole table, history included.
       #
       index: [:status, :worker_module]
     ],
     ant_counters: [
-      attributes: [:table_name, :count],
-      type: :set
+      attributes: [:table_name, :count]
     ]
   ]
 
   def tables, do: @tables
+
+  # Ids come from a sequential counter, so in an ordered_set the queue can ask
+  # for the oldest jobs and get them without sorting the whole backlog. DETS,
+  # which backs disc_only_copies, has no ordered_set.
+  #
+  def table_type(:disc_only_copies), do: :set
+  def table_type(_persistence_strategy), do: :ordered_set
 
   def run do
     persistence_strategy = persistence_strategy()
@@ -152,7 +157,12 @@ defmodule Ant.Database.Setup do
   end
 
   def create_table!(table, options, persistence_strategy) do
-    case :mnesia.create_table(table, Keyword.put(options, persistence_strategy, [node()])) do
+    options =
+      options
+      |> Keyword.put_new(:type, table_type(persistence_strategy))
+      |> Keyword.put(persistence_strategy, [node()])
+
+    case :mnesia.create_table(table, options) do
       {:atomic, :ok} ->
         :ok
 
@@ -198,8 +208,45 @@ defmodule Ant.Database.Setup do
   #
   def migrate_table!(table, options, persistence_strategy) do
     migrate_storage_type!(table, persistence_strategy)
+    migrate_type!(table, options, persistence_strategy)
     migrate_attributes!(table, Keyword.fetch!(options, :attributes))
     migrate_indexes!(table, Keyword.get(options, :index, []))
+  end
+
+  defp migrate_type!(table, options, persistence_strategy) do
+    type = Keyword.get(options, :type, table_type(persistence_strategy))
+
+    case :mnesia.table_info(table, :type) do
+      ^type -> :ok
+      current_type -> rebuild_table!(table, options, persistence_strategy, current_type, type)
+    end
+  end
+
+  # Mnesia can not change the type of an existing table, so the rows are copied
+  # to a second table, the table is recreated with the new type, and the rows
+  # are copied back. The copy is only dropped once they are, so an interrupted
+  # migration leaves the rows in `<table>_migration` rather than nowhere.
+  #
+  defp rebuild_table!(table, options, persistence_strategy, current_type, type) do
+    Logger.info(
+      "Ant is rebuilding the #{table} table as #{inspect(type)} " <>
+        "(it was created as #{inspect(current_type)})."
+    )
+
+    copy = :"#{table}_migration"
+    rows = :mnesia.dirty_select(table, [{:_, [], [:"$_"]}])
+
+    create_table!(copy, options, persistence_strategy)
+    Enum.each(rows, &:mnesia.dirty_write(put_elem(&1, 0, copy)))
+
+    {:atomic, :ok} = :mnesia.delete_table(table)
+
+    create_table!(table, options, persistence_strategy)
+    Enum.each(rows, &:mnesia.dirty_write/1)
+
+    {:atomic, :ok} = :mnesia.delete_table(copy)
+
+    :ok
   end
 
   defp migrate_storage_type!(table, persistence_strategy) do

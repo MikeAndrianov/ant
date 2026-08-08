@@ -147,6 +147,38 @@ defmodule Ant.Database.SetupTest do
     end
   end
 
+  describe "migrate_table!/3 type changes" do
+    setup do
+      on_exit(fn -> :mnesia.delete_table(:"#{@table}_migration") end)
+    end
+
+    test "rebuilds a table created with the wrong type, keeping the rows" do
+      # A table persisted as a :set by a version before the queue relied on id
+      # ordering.
+      #
+      options = [attributes: [:id, :name], type: :set]
+      :ok = Setup.create_table!(@table, options, :ram_copies)
+      for i <- 1..3, do: :mnesia.dirty_write({@table, i, "row #{i}"})
+
+      assert :ok =
+               Setup.migrate_table!(@table, [attributes: [:id, :name]], :ram_copies)
+
+      assert :mnesia.table_info(@table, :type) == :ordered_set
+      assert :mnesia.table_info(@table, :size) == 3
+      assert :mnesia.dirty_read({@table, 2}) == [{@table, 2, "row 2"}]
+
+      # The copy the rows were parked in is gone once they are back.
+      #
+      refute :"#{@table}_migration" in :mnesia.system_info(:tables)
+    end
+
+    test "keeps :set for disc_only_copies, which has no ordered_set" do
+      assert Setup.table_type(:disc_only_copies) == :set
+      assert Setup.table_type(:disc_copies) == :ordered_set
+      assert Setup.table_type(:ram_copies) == :ordered_set
+    end
+  end
+
   describe "ensure_tables_available!/0" do
     test "returns :ok once the tables the application created are loaded" do
       assert :ok = Setup.ensure_tables_available!()

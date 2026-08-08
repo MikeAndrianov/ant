@@ -129,6 +129,8 @@ By default `ant` uses Mnesia with in-memory (`:ram_copies`) persistence strategy
 
 Changing the strategy later is applied on the next start: an existing table is converted to the newly configured one.
 
+Jobs are picked up oldest first. With `:disc_only_copies` that ordering isn't guaranteed — the underlying storage has no ordered table — so a queue with a large backlog may run jobs out of order.
+
 For `:disc_copies` and `:disc_only_copies` it's also possible to set custom path to the directory for storing database files using `persistence_dir` option in the configuration.
 
 ```elixir

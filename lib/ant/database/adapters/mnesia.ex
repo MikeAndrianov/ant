@@ -155,15 +155,21 @@ defmodule Ant.Database.Adapters.Mnesia do
   defp fetch_rows(db_table, %{id: id}, _table_columns, _limit) when not is_nil(id),
     do: transaction!(fn -> :mnesia.read({db_table, id}) end)
 
-  defp fetch_rows(db_table, params, table_columns, limit) do
+  # An index read has no limit: it returns every row with that value, and the
+  # caller pays for all of them. So a query with a limit is scanned instead,
+  # stopping as soon as it has enough rows - on an ordered_set that also means
+  # the rows come back oldest id first. Only an unlimited query, which has to
+  # materialise its whole result anyway, goes through the index.
+  #
+  defp fetch_rows(db_table, params, table_columns, nil) do
     case indexed_clause(db_table, params, table_columns) do
-      {column, value} ->
-        transaction!(fn -> :mnesia.index_read(db_table, value, column) end)
-
-      nil ->
-        scan(db_table, params, table_columns, limit)
+      {column, value} -> transaction!(fn -> :mnesia.index_read(db_table, value, column) end)
+      nil -> scan(db_table, params, table_columns, nil)
     end
   end
+
+  defp fetch_rows(db_table, params, table_columns, limit),
+    do: scan(db_table, params, table_columns, limit)
 
   # Picks a clause Mnesia can resolve through a secondary index. The remaining
   # clauses are applied to the (much smaller) result by `matches?/2`.

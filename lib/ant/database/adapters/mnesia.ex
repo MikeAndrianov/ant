@@ -138,6 +138,23 @@ defmodule Ant.Database.Adapters.Mnesia do
     end
   end
 
+  def transaction(fun) do
+    case :mnesia.transaction(fun) do
+      {:atomic, result} -> result
+      {:aborted, reason} -> {:error, {:transaction_aborted, reason}}
+    end
+  end
+
+  # Takes a write lock on a key of the table, which does not have to exist: it
+  # is the only way to make transactions that insert *different* rows exclude
+  # each other, since a lock on a row that is not there yet locks nothing.
+  #
+  def lock(db_table, key) do
+    :mnesia.lock({:record, db_table, key}, :write)
+
+    :ok
+  end
+
   def delete(db_table, id) do
     with {:ok, _} <- get(db_table, id),
          {:atomic, :ok} <- :mnesia.transaction(fn -> :mnesia.delete({db_table, id}) end) do

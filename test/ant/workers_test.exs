@@ -286,6 +286,39 @@ defmodule Ant.WorkersTest do
       assert Workers.create_worker(worker) == {:error, :database_error}
     end
 
+    test "creates only one worker when the same unique worker is created concurrently" do
+      # The uniqueness check and the insert used to run in separate
+      # transactions, so every one of these calls found no duplicate and
+      # inserted a worker of its own.
+      #
+      test_pid = self()
+
+      tasks =
+        for _ <- 1..10 do
+          Task.async(fn ->
+            send(test_pid, {:ready, self()})
+
+            receive do
+              :go -> UniqueTestWorker.perform_async(%{email: "race@example.com"})
+            after
+              1_000 -> {:error, :timed_out}
+            end
+          end)
+        end
+
+      # Released together, so the calls really do overlap.
+      #
+      for _ <- tasks, do: assert_receive({:ready, _pid}, 1_000)
+      Enum.each(tasks, &send(&1.pid, :go))
+
+      results = Task.await_many(tasks)
+
+      assert Enum.count(results, &match?({:ok, _worker}, &1)) == 1
+      assert Enum.count(results, &(&1 == {:error, :already_exists})) == 9
+
+      assert {:ok, [_worker]} = Workers.list_workers(%{})
+    end
+
     test "calls uniqueness checker with worker containing unique config" do
       worker = UniqueTestWorker.build(%{email: "test@example.com"})
 

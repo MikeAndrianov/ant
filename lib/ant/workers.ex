@@ -2,21 +2,40 @@ defmodule Ant.Workers do
   alias Ant.Repo
   alias Ant.WorkerUniquenessChecker
 
-  @spec create_worker(Ant.Worker.t()) :: {:ok, Ant.Worker.t()} | {:error, atom()}
+  @spec create_worker(Ant.Worker.t()) :: {:ok, Ant.Worker.t()} | {:error, any()}
   def create_worker(worker) do
-    with :ok <- WorkerUniquenessChecker.call(worker) do
-      params = %{
-        worker_module: worker.worker_module,
-        status: :enqueued,
-        attempts: 0,
-        queue_name: worker.queue_name,
-        args: worker.args,
-        scheduled_at: worker.scheduled_at,
-        errors: [],
-        opts: worker.opts
-      }
+    params = %{
+      worker_module: worker.worker_module,
+      status: :enqueued,
+      attempts: 0,
+      queue_name: worker.queue_name,
+      args: worker.args,
+      scheduled_at: worker.scheduled_at,
+      errors: [],
+      opts: worker.opts
+    }
 
-      Repo.insert(:ant_workers, params)
+    # The check and the insert have to happen in one transaction. Run
+    # separately, two concurrent calls both found no duplicate and both
+    # inserted a worker.
+    #
+    Repo.transaction(fn ->
+      with :ok <- lock_duplicates(worker),
+           :ok <- WorkerUniquenessChecker.call(worker) do
+        Repo.insert(:ant_workers, params)
+      end
+    end)
+  end
+
+  # Creations that could turn out to be duplicates of each other take the same
+  # lock, so the second one runs its uniqueness check only after the first has
+  # committed. Locking the row itself would not do: the rows are new, and each
+  # one gets an id of its own.
+  #
+  defp lock_duplicates(worker) do
+    case WorkerUniquenessChecker.lock_key(worker) do
+      nil -> :ok
+      key -> Repo.lock(:ant_workers, key)
     end
   end
 

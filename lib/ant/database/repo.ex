@@ -42,6 +42,12 @@ defmodule Ant.Repo do
     Ant.Database.Adapters.Mnesia.delete(db_table, id)
   end
 
+  # Runs `fun` in a transaction and returns what it returned.
+  #
+  def transaction(fun), do: Ant.Database.Adapters.Mnesia.transaction(fun)
+
+  def lock(db_table, key), do: Ant.Database.Adapters.Mnesia.lock(db_table, key)
+
   defp to_struct(db_table, record) do
     @table_to_struct_mapping
     |> Map.get(db_table)

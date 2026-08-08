@@ -13,12 +13,35 @@ defmodule Ant.WorkerUniquenessChecker do
   """
   @spec call(Ant.Worker.t()) :: :ok | {:error, :already_exists}
   def call(worker) do
-    unique_config = Keyword.get(worker.opts, :unique, [])
-    unique_attributes = Keyword.get(unique_config, :args, [])
+    unique_config = unique_config(worker)
     statuses = Keyword.get(unique_config, :statuses, [:enqueued, :running, :scheduled, :retrying])
 
-    do_check(worker, unique_attributes, statuses)
+    do_check(worker, unique_attributes(worker), statuses)
   end
+
+  @doc """
+  Returns the key that concurrent creations of the same unique worker contend
+  on, or `nil` when the worker has no uniqueness configured.
+
+  Two workers can only be duplicates of each other when they share a module, a
+  queue and the values of every unique attribute, which is exactly what the key
+  is built from.
+  """
+  @spec lock_key(Ant.Worker.t()) :: tuple() | nil
+  def lock_key(worker) do
+    case unique_attributes(worker) do
+      [] ->
+        nil
+
+      unique_attributes ->
+        {:unique, worker.worker_module, worker.queue_name,
+         Map.take(worker.args, unique_attributes)}
+    end
+  end
+
+  defp unique_config(worker), do: Keyword.get(worker.opts, :unique, [])
+
+  defp unique_attributes(worker), do: worker |> unique_config() |> Keyword.get(:args, [])
 
   defp do_check(_worker, _unique_attributes = [], _statuses), do: :ok
 

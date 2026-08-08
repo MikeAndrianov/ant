@@ -73,6 +73,28 @@ defmodule Ant.WorkerTest do
     end
   end
 
+  defmodule TimingOutWorker do
+    use Ant.Worker, max_attempts: 2, timeout: 20
+
+    def perform(worker) do
+      send(worker.args.test_pid, {:performing, self()})
+
+      Process.sleep(:infinity)
+    end
+
+    def calculate_delay(_worker), do: 0
+  end
+
+  defmodule SlowEnoughWorker do
+    use Ant.Worker, timeout: 1_000
+
+    def perform(_worker) do
+      Process.sleep(10)
+
+      :ok
+    end
+  end
+
   defmodule TestWorkerWithQueueName do
     use Ant.Worker, queue: "test_queue"
 
@@ -96,7 +118,7 @@ defmodule Ant.WorkerTest do
       assert worker.updated_at
       assert worker.attempts == 0
       assert worker.errors == []
-      assert worker.opts == [unique: [], max_attempts: 1]
+      assert worker.opts == [unique: [], timeout: :infinity, max_attempts: 1]
     end
   end
 
@@ -326,6 +348,80 @@ defmodule Ant.WorkerTest do
                "%FunctionClauseError{module: Ant.WorkerTest.ExceptionWorkerHandlesExceptionWithoutMessage, function: :whoops, arity: 1, kind: nil, args: nil, clauses: nil}"
 
       assert error.attempt == 1
+    end
+  end
+
+  describe "timeouts" do
+    test "gives up on a job that runs longer than its timeout and retries it" do
+      {:ok, worker} =
+        %{test_pid: self()}
+        |> TimingOutWorker.build()
+        |> Ant.Workers.create_worker()
+
+      {:ok, pid} = Worker.start_link(worker)
+      ref = Process.monitor(pid)
+
+      assert Worker.perform(pid) == :ok
+
+      assert_receive {:performing, job_pid}, 1_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+
+      # The job is stopped, not left running with nobody waiting for it.
+      #
+      refute Process.alive?(job_pid)
+
+      {:ok, updated_worker} = Ant.Repo.get(:ant_workers, worker.id)
+
+      assert updated_worker.status == :retrying
+      assert updated_worker.attempts == 1
+
+      assert [error] = updated_worker.errors
+      assert error.error == "Worker timed out after 20ms"
+      assert error.attempt == 1
+    end
+
+    test "fails a job that times out on its last attempt" do
+      worker_params =
+        %{test_pid: self()}
+        |> TimingOutWorker.build()
+        |> Map.put(:attempts, 1)
+        |> Map.from_struct()
+
+      {:ok, worker} = Ant.Repo.insert(:ant_workers, worker_params)
+
+      {:ok, pid} = Worker.start_link(worker)
+      ref = Process.monitor(pid)
+
+      assert Worker.perform(pid) == :ok
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+
+      {:ok, updated_worker} = Ant.Repo.get(:ant_workers, worker.id)
+
+      assert updated_worker.status == :failed
+      assert updated_worker.attempts == 2
+    end
+
+    test "a job can override the timeout of its worker" do
+      assert TimingOutWorker.build(%{}).opts[:timeout] == 20
+      assert TimingOutWorker.build(%{}, timeout: 5_000).opts[:timeout] == 5_000
+    end
+
+    test "lets a job that finishes within its timeout complete" do
+      {:ok, worker} =
+        %{}
+        |> SlowEnoughWorker.build()
+        |> Ant.Workers.create_worker()
+
+      {:ok, pid} = Worker.start_link(worker)
+      ref = Process.monitor(pid)
+
+      assert Worker.perform(pid) == :ok
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+
+      {:ok, updated_worker} = Ant.Repo.get(:ant_workers, worker.id)
+
+      assert updated_worker.status == :completed
+      assert updated_worker.errors == []
     end
   end
 

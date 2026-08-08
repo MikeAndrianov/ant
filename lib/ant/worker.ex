@@ -37,10 +37,12 @@ defmodule Ant.Worker do
 
   @default_max_attempts 1
   @default_retry_delay 10_000
+  @default_timeout :infinity
 
   defmacro __using__(opts) do
     queue_name = Keyword.get(opts, :queue)
     max_attempts = Keyword.get(opts, :max_attempts, @default_max_attempts)
+    timeout = Keyword.get(opts, :timeout, @default_timeout)
     unique = Keyword.get(opts, :unique, [])
 
     quote do
@@ -58,6 +60,7 @@ defmodule Ant.Worker do
         opts =
           opts
           |> Keyword.put_new(:max_attempts, unquote(max_attempts))
+          |> Keyword.put_new(:timeout, unquote(timeout))
           |> Keyword.put_new(:unique, unquote(unique))
 
         %Ant.Worker{
@@ -135,21 +138,44 @@ defmodule Ant.Worker do
 
     state = Map.put(state, :worker, worker)
 
-    try do
-      worker
-      |> worker.worker_module.perform()
-      |> handle_result(state)
-    rescue
-      exception ->
-        handle_exception(exception, __STACKTRACE__, state)
-    catch
-      # `rescue` above handles exceptions; without this clause `throw` and `exit`
-      # crash the worker process, skipping retries and leaving the job
-      # stuck in the :running status.
-      kind, value ->
-        handle_caught(kind, value, __STACKTRACE__, state)
+    case perform_job(worker) do
+      {:ok, result} -> handle_result(result, state)
+      {:exception, exception, stack_trace} -> handle_exception(exception, stack_trace, state)
+      {:caught, kind, value, stack_trace} -> handle_caught(kind, value, stack_trace, state)
+      :timeout -> handle_timeout(state)
     end
   end
+
+  # The job runs in a task so that it can be given up on: a `perform/1` that
+  # hangs would otherwise occupy its slot in the queue forever.
+  #
+  defp perform_job(worker) do
+    task =
+      Task.async(fn ->
+        try do
+          {:ok, worker.worker_module.perform(worker)}
+        rescue
+          exception ->
+            {:exception, exception, __STACKTRACE__}
+        catch
+          # `rescue` above handles exceptions; without this clause `throw` and
+          # `exit` crash the worker process, skipping retries and leaving the
+          # job stuck in the :running status.
+          kind, value ->
+            {:caught, kind, value, __STACKTRACE__}
+        end
+      end)
+
+    case Task.yield(task, timeout(worker)) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> result
+      {:exit, reason} -> {:caught, :exit, reason, []}
+      nil -> :timeout
+    end
+  end
+
+  # Workers created before timeouts existed have no :timeout in their opts.
+  #
+  defp timeout(worker), do: worker.opts[:timeout] || @default_timeout
 
   defp handle_result(:ok, state), do: complete(state)
   defp handle_result({:ok, _result}, state), do: complete(state)
@@ -190,6 +216,18 @@ defmodule Ant.Worker do
         attempt: state.worker.attempts,
         error: Exception.format_banner(kind, value),
         stack_trace: Exception.format_stacktrace(stack_trace),
+        attempted_at: DateTime.utc_now()
+      },
+      state
+    )
+  end
+
+  defp handle_timeout(state) do
+    fail(
+      %{
+        attempt: state.worker.attempts,
+        error: "Worker timed out after #{timeout(state.worker)}ms",
+        stack_trace: nil,
         attempted_at: DateTime.utc_now()
       },
       state

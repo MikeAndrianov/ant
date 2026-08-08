@@ -103,6 +103,26 @@ defmodule MyWorker do
 end
 ```
 
+### Timeouts
+
+By default a job runs for as long as it needs to. A job that hangs occupies a slot in its queue forever, so it's worth giving jobs that talk to the outside world a `timeout` (in milliseconds):
+
+```elixir
+defmodule MyWorker do
+  use Ant.Worker, max_attempts: 3, timeout: :timer.seconds(30)
+
+  def perform(args) do
+    # ...
+  end
+end
+```
+
+A job that runs longer than that is stopped and treated as a failed attempt: it's retried if it has attempts left, and marked as `:failed` otherwise. The timeout can also be set per job, which overrides the worker definition:
+
+```elixir
+MyWorker.perform_async(%{first: "first"}, timeout: :timer.seconds(5))
+```
+
 ### Database
 
 By default `ant` uses Mnesia with in-memory (`:ram_copies`) persistence strategy. To store jobs on a disk, please use one of the following strategies: `:disc_copies` or `:disc_only_copies`.

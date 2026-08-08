@@ -1,6 +1,8 @@
 defmodule Ant.Database.SetupTest do
   use ExUnit.Case
 
+  import ExUnit.CaptureLog
+
   alias Ant.Database.Setup
 
   @table :ant_setup_test
@@ -41,6 +43,33 @@ defmodule Ant.Database.SetupTest do
       assert_raise RuntimeError, ~r/requires the app to run with a node name/, fn ->
         Setup.persistence_strategy()
       end
+    end
+  end
+
+  describe "ensure_mnesia_started!/0" do
+    test "leaves a running Mnesia alone when its directory can not be moved safely" do
+      # Mnesia already holds tables here, as it would in a host application
+      # that uses Mnesia itself - taking those down to move the directory is
+      # not Ant's call.
+      #
+      Application.put_env(:ant, :database, persistence_dir: "/tmp/ant_somewhere_else")
+      directory = :mnesia.system_info(:directory)
+
+      log = capture_log(fn -> assert :ok = Setup.ensure_mnesia_started!() end)
+
+      assert log =~ "is ignored because Mnesia is already running"
+      assert :mnesia.system_info(:directory) == directory
+      assert :mnesia.system_info(:is_running) == :yes
+    end
+
+    test "does nothing when the running Mnesia is already in the configured directory" do
+      directory = to_string(:mnesia.system_info(:directory))
+      Application.put_env(:ant, :database, persistence_dir: directory)
+
+      log = capture_log(fn -> assert :ok = Setup.ensure_mnesia_started!() end)
+
+      refute log =~ "ignored"
+      assert to_string(:mnesia.system_info(:directory)) == directory
     end
   end
 

@@ -127,6 +127,8 @@ MyWorker.perform_async(%{first: "first"}, timeout: :timer.seconds(5))
 
 By default `ant` uses Mnesia with in-memory (`:ram_copies`) persistence strategy. To store jobs on a disk, please use one of the following strategies: `:disc_copies` or `:disc_only_copies`.
 
+Changing the strategy later is applied on the next start: an existing table is converted to the newly configured one.
+
 For `:disc_copies` and `:disc_only_copies` it's also possible to set custom path to the directory for storing database files using `persistence_dir` option in the configuration.
 
 ```elixir
@@ -140,6 +142,14 @@ config :ant,
       |> String.to_charlist()
   ]
 ```
+
+Mnesia reads its directory once, when it starts. `ant` applies `persistence_dir` while Mnesia holds nothing but an empty schema; if your application uses Mnesia itself, the setting is ignored with a warning, since moving the directory would mean taking your own tables down. Configure Mnesia directly in that case:
+
+```elixir
+config :mnesia, dir: ~c"/var/lib/my_app/mnesia"
+```
+
+Note that disc persistence needs the node to have a name — start the application with `--sname` or `--name`.
 
 Workers are stored in the database for 2 weeks. You can change this by setting `ttl` option:
 

@@ -70,14 +70,47 @@ defmodule Ant.Database.Setup do
 
   def ensure_mnesia_started! do
     if :mnesia.system_info(:is_running) in [:yes, :starting] do
-      warn_on_ignored_persistence_dir()
+      apply_persistence_dir_to_running_mnesia()
     else
       configure_persistence_dir()
+      start_mnesia!()
+    end
+  end
 
-      case :mnesia.start() do
-        :ok -> :ok
-        error -> raise "Ant could not start Mnesia: #{inspect(error)}."
-      end
+  # Mnesia is usually running before Ant starts - it is one of the
+  # application's extra_applications - and its :dir is only read when it
+  # starts. Restarting it to apply :persistence_dir is safe while it holds
+  # nothing but an empty schema, which is the case when the host application
+  # does not use Mnesia itself. Otherwise the setting is ignored: taking the
+  # host's own tables down to move their directory is not Ant's call.
+  #
+  defp apply_persistence_dir_to_running_mnesia do
+    dir = database_config()[:persistence_dir]
+    current_dir = to_string(:mnesia.system_info(:directory))
+
+    cond do
+      is_nil(dir) or to_string(dir) == current_dir ->
+        :ok
+
+      :mnesia.system_info(:tables) != [:schema] ->
+        Logger.warning(
+          "Ant's :persistence_dir (#{dir}) is ignored because Mnesia is already running " <>
+            "in #{current_dir} with tables of its own. Configure `config :mnesia, dir: ...` " <>
+            "instead, which is applied before Mnesia starts."
+        )
+
+      true ->
+        :stopped = :mnesia.stop()
+
+        configure_persistence_dir()
+        start_mnesia!()
+    end
+  end
+
+  defp start_mnesia! do
+    case :mnesia.start() do
+      :ok -> :ok
+      error -> raise "Ant could not start Mnesia: #{inspect(error)}."
     end
   end
 
@@ -302,23 +335,6 @@ defmodule Ant.Database.Setup do
       nil -> :ok
       dir -> Application.put_env(:mnesia, :dir, to_charlist(dir))
     end
-  end
-
-  # The :dir setting is only read when Mnesia starts, so it can not be applied
-  # to a Mnesia the host application has already started.
-  #
-  defp warn_on_ignored_persistence_dir do
-    dir = database_config()[:persistence_dir]
-    current_dir = to_string(:mnesia.system_info(:directory))
-
-    if dir && to_string(dir) != current_dir do
-      Logger.warning(
-        "Ant's :persistence_dir (#{dir}) is ignored because Mnesia is already running " <>
-          "in #{current_dir}. Configure :mnesia, :dir before starting Mnesia instead."
-      )
-    end
-
-    :ok
   end
 
   defp database_config, do: Application.get_env(:ant, :database, [])

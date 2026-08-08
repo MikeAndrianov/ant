@@ -254,7 +254,14 @@ defmodule Ant.WorkersTest do
       #
       assert Enum.sort(Enum.map(result, & &1.id)) == Enum.sort(Enum.map(workers, & &1.id))
 
-      assert Enum.all?(result, &(Map.keys(&1) == [:id, :scheduled_at, :updated_at]))
+      # Sorted: the order Map.keys/1 returns is not a contract, and it differs
+      # between machines.
+      #
+      assert Enum.all?(
+               result,
+               &(&1 |> Map.keys() |> Enum.sort() == [:id, :scheduled_at, :updated_at])
+             )
+
       assert Enum.all?(result, & &1.updated_at)
     end
   end

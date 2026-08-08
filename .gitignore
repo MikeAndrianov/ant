@@ -26,3 +26,6 @@ ant-*.tar
 /tmp/
 
 /.lexical
+# Dialyzer PLTs, rebuilt from mix.lock.
+/priv/plts/*.plt
+/priv/plts/*.plt.hash

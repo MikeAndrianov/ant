@@ -1,4 +1,11 @@
 defmodule Ant.Workers do
+  @moduledoc """
+  Reading and writing the jobs Ant stores.
+
+  `Ant.Worker.perform_async/2` is the usual way to create a job; the functions
+  here are for inspecting and managing the ones already created.
+  """
+
   alias Ant.Repo
   alias Ant.WorkerUniquenessChecker
 
@@ -39,7 +46,7 @@ defmodule Ant.Workers do
     end
   end
 
-  @spec update_worker(integer(), map()) :: {:ok, Ant.Worker.t()} | {:error, atom()}
+  @spec update_worker(integer(), map()) :: {:ok, Ant.Worker.t()} | {:error, any()}
   def update_worker(id, params), do: Repo.update(:ant_workers, id, params)
 
   @spec list_workers() :: {:ok, [Ant.Worker.t()]}
@@ -78,10 +85,10 @@ defmodule Ant.Workers do
   def list_worker_timestamps,
     do: {:ok, Repo.select_columns(:ant_workers, %{}, [:id, :updated_at, :scheduled_at])}
 
-  @spec get_worker(integer()) :: {:ok, Ant.Worker.t()} | {:error, atom()}
+  @spec get_worker(integer()) :: {:ok, Ant.Worker.t()} | {:error, any()}
   def get_worker(id), do: Repo.get(:ant_workers, id)
 
-  @spec delete_worker(Ant.Worker.t() | map()) :: :ok
+  @spec delete_worker(Ant.Worker.t() | map()) :: :ok | {:error, any()}
   def delete_worker(worker), do: Repo.delete(:ant_workers, worker.id)
 
   # The limit must be applied only after rejecting workers that are not due yet

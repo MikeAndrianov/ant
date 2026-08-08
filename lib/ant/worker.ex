@@ -1,4 +1,36 @@
 defmodule Ant.Worker do
+  @moduledoc """
+  A background job, and the process that runs it.
+
+  `use Ant.Worker` in a module that implements `perform/1` to define a job:
+
+      defmodule MyWorker do
+        use Ant.Worker, max_attempts: 3, timeout: :timer.seconds(30)
+
+        def perform(%{args: args} = _worker), do: :ok
+      end
+
+      MyWorker.perform_async(%{email: "user@example.com"})
+
+  `perform/1` receives the `Ant.Worker` struct and must return `:ok` or
+  `{:ok, result}`; anything else counts as a failed attempt, as do exceptions,
+  throws, exits and running past the timeout. A failed attempt is retried while
+  the worker has attempts left, and marked as `:failed` afterwards.
+
+  Options accepted by `use Ant.Worker` and, per job, by `perform_async/2`:
+
+    * `:queue` - the queue that runs the job. Defaults to the first configured
+      queue.
+    * `:max_attempts` - how many times the job may run. Defaults to `1`.
+    * `:timeout` - how long a single attempt may take, in milliseconds.
+      Defaults to `:infinity`.
+    * `:unique` - prevents duplicate jobs, see `Ant.WorkerUniquenessChecker`.
+
+  The delay before a retry defaults to ten seconds times the number of attempts
+  made, and can be replaced by implementing the optional `calculate_delay/1`
+  callback.
+  """
+
   use GenServer
   require Logger
 
@@ -40,10 +72,18 @@ defmodule Ant.Worker do
   @default_timeout :infinity
 
   defmacro __using__(opts) do
-    queue_name = Keyword.get(opts, :queue)
     max_attempts = Keyword.get(opts, :max_attempts, @default_max_attempts)
     timeout = Keyword.get(opts, :timeout, @default_timeout)
     unique = Keyword.get(opts, :unique, [])
+
+    # Resolved here rather than with `queue_name || default_queue_name()` in the
+    # generated code, where a queue given as a literal makes the check dead.
+    #
+    queue_name =
+      case Keyword.get(opts, :queue) do
+        nil -> quote(do: Ant.Worker.default_queue_name())
+        queue_name -> queue_name
+      end
 
     quote do
       @behaviour Ant.Worker
@@ -66,7 +106,7 @@ defmodule Ant.Worker do
         %Ant.Worker{
           worker_module: __MODULE__,
           args: args,
-          queue_name: unquote(queue_name) || Ant.Worker.default_queue_name(),
+          queue_name: unquote(queue_name),
           status: :enqueued,
           attempts: 0,
           scheduled_at: DateTime.utc_now(),

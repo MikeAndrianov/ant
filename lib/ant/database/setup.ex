@@ -281,25 +281,20 @@ defmodule Ant.Database.Setup do
   # above any already-persisted ID to avoid collisions.
   #
   def initialize_id_counter do
-    {:atomic, _} =
-      :mnesia.transaction(fn ->
-        case :mnesia.read({:ant_counters, :ant_workers}) do
-          [] ->
-            max_id =
-              :mnesia.foldl(
-                fn record, acc -> record |> elem(1) |> max(acc) end,
-                0,
-                :ant_workers
-              )
-
-            :mnesia.write({:ant_counters, :ant_workers, max_id})
-
-          _ ->
-            :ok
-        end
-      end)
+    {:atomic, _result} = :mnesia.transaction(&write_initial_id_counter/0)
 
     :ok
+  end
+
+  defp write_initial_id_counter do
+    case :mnesia.read({:ant_counters, :ant_workers}) do
+      [] -> :mnesia.write({:ant_counters, :ant_workers, max_persisted_id()})
+      _counter -> :ok
+    end
+  end
+
+  defp max_persisted_id do
+    :mnesia.foldl(fn record, acc -> record |> elem(1) |> max(acc) end, 0, :ant_workers)
   end
 
   defp configure_persistence_dir do

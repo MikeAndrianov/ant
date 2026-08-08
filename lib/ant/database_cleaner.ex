@@ -1,4 +1,6 @@
 defmodule Ant.DatabaseCleaner do
+  @moduledoc false
+
   use GenServer
   alias Ant.Workers
 

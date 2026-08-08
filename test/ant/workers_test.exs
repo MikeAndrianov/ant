@@ -244,7 +244,11 @@ defmodule Ant.WorkersTest do
       workers = create_test_workers(3)
 
       assert {:ok, result} = Workers.list_worker_timestamps()
-      assert_lists_contain_same(result, workers, equals_by: :id)
+
+      # Compared by id: the rows are partial maps, and sorting those against
+      # whole worker structs compares terms of a different shape.
+      #
+      assert Enum.sort(Enum.map(result, & &1.id)) == Enum.sort(Enum.map(workers, & &1.id))
 
       assert Enum.all?(result, &(Map.keys(&1) == [:id, :scheduled_at, :updated_at]))
       assert Enum.all?(result, & &1.updated_at)

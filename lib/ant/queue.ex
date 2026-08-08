@@ -1,4 +1,19 @@
 defmodule Ant.Queue do
+  @moduledoc """
+  Runs the jobs of one queue, up to `concurrency` of them at a time.
+
+  A queue is started for every entry in the `:queues` configuration and checks
+  the database every `check_interval` milliseconds for work to pick up, in this
+  order: workers left behind by a previous run, then scheduled, retrying and
+  enqueued workers that are due, oldest first.
+
+  Each job runs in its own process, supervised by - and monitored by - the
+  queue, which is how a slot is released: when a worker process terminates, for
+  any reason, the queue frees its slot and looks for more work right away. A
+  worker that terminates without recording its own result is retried or failed
+  by the queue.
+  """
+
   use GenServer
   require Logger
 

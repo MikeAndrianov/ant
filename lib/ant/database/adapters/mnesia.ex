@@ -1,29 +1,15 @@
 defmodule Ant.Database.Adapters.Mnesia do
+  @moduledoc false
+
   # Rows are looked up in the cheapest way the given clauses allow: by primary
   # key, else through a secondary index, and only otherwise by scanning the
   # table. A scan with a limit stops as soon as it has enough rows instead of
   # materialising every matching row first.
 
   def get(db_table, id) do
-    with {:atomic, %{} = record} <-
-           :mnesia.transaction(fn ->
-             case :mnesia.read({db_table, id}) do
-               [] ->
-                 {:error, :not_found}
-
-               [row] ->
-                 table_columns = get_table_columns(db_table)
-
-                 to_map(row, table_columns)
-             end
-           end) do
-      {:ok, record}
-    else
-      {:atomic, {:error, :not_found}} ->
-        {:error, :not_found}
-
-      error ->
-        error
+    case transaction(fn -> read_row(db_table, id) end) do
+      %{} = record -> {:ok, record}
+      error -> error
     end
   end
 
@@ -105,39 +91,18 @@ defmodule Ant.Database.Adapters.Mnesia do
 
     row = List.to_tuple([db_table | attributes])
 
-    with {:atomic, :ok} <- :mnesia.transaction(fn -> :mnesia.write(row) end) do
+    with :ok <- transaction(fn -> :mnesia.write(row) end) do
       {:ok, to_map(row, table_columns)}
     end
   end
 
   def update(db_table, id, params) do
-    with {:atomic, result} <-
-           :mnesia.transaction(fn ->
-             case :mnesia.read({db_table, id}) do
-               [] ->
-                 {:error, :not_found}
-
-               [row] ->
-                 table_columns = get_table_columns(db_table)
-
-                 updated_record =
-                   row
-                   |> to_map(table_columns)
-                   |> Map.merge(params)
-                   |> Map.put(:updated_at, DateTime.utc_now())
-
-                 attributes = Enum.map(table_columns, &Map.get(updated_record, &1))
-                 updated_row = List.to_tuple([db_table | attributes])
-
-                 with :ok <- :mnesia.write(updated_row) do
-                   {:ok, to_map(updated_row, table_columns)}
-                 end
-             end
-           end) do
-      result
-    end
+    transaction(fn -> update_row(db_table, id, params) end)
   end
 
+  # An aborted transaction is reported the same way as any other failure, so
+  # callers never have to know that Mnesia is behind the Repo.
+  #
   def transaction(fun) do
     case :mnesia.transaction(fun) do
       {:atomic, result} -> result
@@ -156,9 +121,34 @@ defmodule Ant.Database.Adapters.Mnesia do
   end
 
   def delete(db_table, id) do
-    with {:ok, _} <- get(db_table, id),
-         {:atomic, :ok} <- :mnesia.transaction(fn -> :mnesia.delete({db_table, id}) end) do
-      :ok
+    with {:ok, _record} <- get(db_table, id) do
+      transaction(fn -> :mnesia.delete({db_table, id}) end)
+    end
+  end
+
+  # These three run inside a transaction of the caller's choosing.
+  #
+  defp update_row(db_table, id, params) do
+    case read_row(db_table, id) do
+      {:error, :not_found} -> {:error, :not_found}
+      record -> write_row(db_table, Map.merge(record, params))
+    end
+  end
+
+  defp read_row(db_table, id) do
+    case :mnesia.read({db_table, id}) do
+      [] -> {:error, :not_found}
+      [row] -> to_map(row, get_table_columns(db_table))
+    end
+  end
+
+  defp write_row(db_table, record) do
+    table_columns = get_table_columns(db_table)
+    record = Map.put(record, :updated_at, DateTime.utc_now())
+    row = List.to_tuple([db_table | Enum.map(table_columns, &Map.get(record, &1))])
+
+    with :ok <- :mnesia.write(row) do
+      {:ok, to_map(row, table_columns)}
     end
   end
 

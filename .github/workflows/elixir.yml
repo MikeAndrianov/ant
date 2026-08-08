@@ -41,3 +41,19 @@ jobs:
 
     - name: Check formatting
       run: mix format --check-formatted
+
+    - name: Run Credo
+      run: mix credo
+
+    # The PLT describes Elixir, Erlang and the dependencies, so it only has to
+    # be rebuilt when one of those changes - building it takes minutes.
+    - name: Cache Dialyzer PLT
+      uses: actions/cache@v4
+      with:
+        path: priv/plts
+        key: ${{ runner.os }}-plt-${{ hashFiles('**/mix.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-plt-
+
+    - name: Run Dialyzer
+      run: mix dialyzer --format short

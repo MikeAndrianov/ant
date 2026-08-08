@@ -43,7 +43,9 @@ defmodule Ant.WorkerUniquenessChecker do
 
   defp unique_attributes(worker), do: worker |> unique_config() |> Keyword.get(:args, [])
 
-  defp do_check(_worker, _unique_attributes = [], _statuses), do: :ok
+  # No unique attributes configured, so nothing can be a duplicate.
+  #
+  defp do_check(_worker, [], _statuses), do: :ok
 
   defp do_check(worker, unique_attributes, statuses) do
     with {:ok, existing_workers} <-

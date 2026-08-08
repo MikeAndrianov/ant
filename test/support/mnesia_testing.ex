@@ -1,4 +1,6 @@
 defmodule MnesiaTesting do
+  @moduledoc false
+
   defmacro __using__(_opts) do
     quote do
       setup_all do

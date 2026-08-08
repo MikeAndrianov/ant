@@ -95,9 +95,7 @@ defmodule Ant.RepoTest do
     test "returns empty list when no matches found" do
       create_test_records(2)
 
-      result = Repo.filter(:ant_workers, %{status: :completed})
-
-      assert length(result) == 0
+      assert Repo.filter(:ant_workers, %{status: :completed}) == []
     end
 
     test "respects limit option" do

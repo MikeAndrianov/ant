@@ -31,7 +31,16 @@ defmodule Ant.Queue do
     check_interval = Keyword.get(config, :check_interval, @check_interval)
     concurrency = Keyword.get(config, :concurrency, @default_concurrency)
 
+    # Worker processes belong to this queue rather than to a supervisor shared
+    # by all of them. A supervisor shuts down when the process that started it
+    # exits, so workers never outlive their queue - a restarted queue used to
+    # find its own still-running workers in the :running status and start a
+    # second process for each of them.
+    #
+    {:ok, workers_supervisor} = DynamicSupervisor.start_link(strategy: :one_for_one)
+
     initial_state = %{
+      workers_supervisor: workers_supervisor,
       stuck_workers: [],
       # Monitor reference => id of the worker running in the monitored process.
       # Workers are removed when their process goes down, so the size of this map
@@ -212,7 +221,7 @@ defmodule Ant.Queue do
 
     child_spec = Supervisor.child_spec({Ant.Worker, running_worker}, restart: :temporary)
 
-    case DynamicSupervisor.start_child(Ant.WorkersSupervisor, child_spec) do
+    case DynamicSupervisor.start_child(state.workers_supervisor, child_spec) do
       {:ok, pid} ->
         # The monitor is set up before the job starts, so a worker that finishes
         # immediately still releases its slot.

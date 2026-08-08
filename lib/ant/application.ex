@@ -14,10 +14,10 @@ defmodule Ant.Application do
   end
 
   def children do
-    base_children = [
-      {Registry, keys: :unique, name: Ant.QueueRegistry},
-      {DynamicSupervisor, name: Ant.WorkersSupervisor, strategy: :one_for_one}
-    ]
+    # Worker processes are supervised by the queue that started them,
+    # see Ant.Queue.init/1.
+    #
+    base_children = [{Registry, keys: :unique, name: Ant.QueueRegistry}]
 
     # `start_queues: false` allows enqueuing and inspecting workers without
     # queues picking them up and running them in the background.

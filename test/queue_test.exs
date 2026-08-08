@@ -244,6 +244,31 @@ defmodule Ant.QueueTest do
       assert wait_until(fn -> worker_status(worker.id) == :failed end)
     end
 
+    test "kills the workers it started when the queue itself goes down" do
+      queue_name = "queue_restart"
+      worker = create_worker(queue_name)
+
+      queue = start_queue(queue_name, concurrency: 1)
+
+      assert_receive {:started, id, worker_pid}, 1_000
+      worker_ref = Process.monitor(worker_pid)
+
+      Process.unlink(queue)
+      Process.exit(queue, :kill)
+
+      # A worker that outlives its queue is invisible to the replacement queue,
+      # which finds the job in the :running status and starts a second process
+      # for it - running the job twice.
+      #
+      assert_receive {:DOWN, ^worker_ref, :process, ^worker_pid, _reason}, 1_000
+      assert worker_status(worker.id) == :running
+
+      start_queue(queue_name, concurrency: 1)
+
+      assert_receive {:started, ^id, _pid}, 1_000
+      refute_receive {:started, ^id, _pid}, 300
+    end
+
     test "keeps running when a worker process can not be started" do
       Mimic.copy(DynamicSupervisor)
       set_mimic_global(%{})
@@ -251,7 +276,7 @@ defmodule Ant.QueueTest do
       queue_name = "unstartable_worker"
       worker = create_worker(queue_name)
 
-      stub(DynamicSupervisor, :start_child, fn Ant.WorkersSupervisor, _child_spec ->
+      stub(DynamicSupervisor, :start_child, fn _supervisor, _child_spec ->
         {:error, :max_children}
       end)
 
@@ -272,10 +297,11 @@ defmodule Ant.QueueTest do
     config = Keyword.put_new(config, :check_interval, 5_000)
     {:ok, queue} = Queue.start_link(queue: queue_name, config: config)
 
-    on_exit(fn ->
-      stop_queue(queue)
-      stop_running_workers()
-    end)
+    # Stopping the queue also stops the workers it started, which would
+    # otherwise stay blocked in `perform/1` and write to the database while the
+    # next test is running.
+    #
+    on_exit(fn -> stop_queue(queue) end)
 
     queue
   end
@@ -284,17 +310,6 @@ defmodule Ant.QueueTest do
     if Process.alive?(queue), do: GenServer.stop(queue)
   catch
     :exit, _ -> :ok
-  end
-
-  # Workers blocked in `perform/1` would otherwise outlive the test
-  # and write to the database while the next one is running.
-  #
-  defp stop_running_workers do
-    Ant.WorkersSupervisor
-    |> DynamicSupervisor.which_children()
-    |> Enum.each(fn {_, pid, _, _} ->
-      DynamicSupervisor.terminate_child(Ant.WorkersSupervisor, pid)
-    end)
   end
 
   defp create_worker(queue_name, attrs \\ %{}, worker_module \\ ControlledWorker) do

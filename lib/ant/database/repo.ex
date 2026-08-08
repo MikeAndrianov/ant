@@ -21,6 +21,11 @@ defmodule Ant.Repo do
     |> Enum.map(&to_struct(db_table, &1))
   end
 
+  # Returns plain maps rather than structs: the rows are partial by design.
+  #
+  def select_columns(db_table, params, columns),
+    do: Ant.Database.Adapters.Mnesia.select_columns(db_table, params, columns)
+
   def insert(db_table, params) do
     with {:ok, record} <- Ant.Database.Adapters.Mnesia.insert(db_table, params) do
       {:ok, to_struct(db_table, record)}

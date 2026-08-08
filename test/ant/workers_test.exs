@@ -207,6 +207,50 @@ defmodule Ant.WorkersTest do
     end
   end
 
+  describe "list_enqueued_workers/3" do
+    test "returns the enqueued workers in the order they were created" do
+      # `filter/3` returns rows in table order, so a limit used to keep an
+      # arbitrary subset: an old job could be passed over indefinitely while
+      # newer ones ran.
+      #
+      workers = create_test_workers(5)
+
+      assert {:ok, result} = Workers.list_enqueued_workers(%{}, DateTime.utc_now(), limit: 3)
+
+      assert Enum.map(result, & &1.id) == workers |> Enum.map(& &1.id) |> Enum.take(3)
+    end
+
+    test "returns the workers scheduled earliest first" do
+      now = DateTime.utc_now()
+
+      [_w1, w2, _w3, w4] = create_scheduled_test_workers(:enqueued, now, [-10, -40, -20, -30])
+
+      assert {:ok, result} = Workers.list_enqueued_workers(%{}, now, limit: 2)
+      assert Enum.map(result, & &1.id) == [w2.id, w4.id]
+    end
+
+    test "does not return workers scheduled in the future" do
+      now = DateTime.utc_now()
+
+      [_future, due] = create_scheduled_test_workers(:enqueued, now, [60, -10])
+
+      assert {:ok, [worker]} = Workers.list_enqueued_workers(%{}, now)
+      assert worker.id == due.id
+    end
+  end
+
+  describe "list_worker_timestamps/0" do
+    test "returns only the id and the timestamps of every worker" do
+      workers = create_test_workers(3)
+
+      assert {:ok, result} = Workers.list_worker_timestamps()
+      assert_lists_contain_same(result, workers, equals_by: :id)
+
+      assert Enum.all?(result, &(Map.keys(&1) == [:id, :scheduled_at, :updated_at]))
+      assert Enum.all?(result, & &1.updated_at)
+    end
+  end
+
   describe "create_worker/1" do
     test "creates worker when uniqueness check passes" do
       worker = TestWorker.build(%{email: "test@example.com"})

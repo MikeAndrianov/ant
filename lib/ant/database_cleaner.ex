@@ -33,8 +33,11 @@ defmodule Ant.DatabaseCleaner do
     Process.send_after(self(), :cleanup, interval)
   end
 
+  # Only the timestamps are read: loading whole rows meant pulling every job's
+  # args and error stack traces into memory once an hour.
+  #
   defp run(ttl) do
-    with {:ok, workers} <- Workers.list_workers() do
+    with {:ok, workers} <- Workers.list_worker_timestamps() do
       workers
       |> Enum.filter(&expired?(&1, ttl))
       |> Enum.each(&Workers.delete_worker/1)

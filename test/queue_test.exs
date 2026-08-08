@@ -38,25 +38,23 @@ defmodule Ant.QueueTest do
   describe "processing workers" do
     test "runs an enqueued worker and releases its slot when it finishes" do
       queue_name = "releases_slot"
-      ids = for _ <- 1..2, do: create_worker(queue_name).id
+      [first, second] = for _ <- 1..2, do: create_worker(queue_name).id
 
       queue = start_queue(queue_name, concurrency: 1)
 
-      assert_receive {:started, id, pid}, 1_000
-      assert id in ids
-      assert worker_status(id) == :running
-      assert processing_worker_ids(queue) == [id]
+      assert_receive {:started, ^first, pid}, 1_000
+      assert worker_status(first) == :running
+      assert processing_worker_ids(queue) == [first]
 
       finish(pid, :ok)
 
       # The freed slot is taken by the next worker without waiting
       # for the next scheduled check.
       #
-      assert_receive {:started, next_id, _pid}, 1_000
-      assert next_id == Enum.find(ids, &(&1 != id))
+      assert_receive {:started, ^second, _pid}, 1_000
 
-      assert wait_until(fn -> worker_status(id) == :completed end)
-      assert processing_worker_ids(queue) == [next_id]
+      assert wait_until(fn -> worker_status(first) == :completed end)
+      assert processing_worker_ids(queue) == [second]
     end
 
     test "runs scheduled, retrying and enqueued workers that are due" do
@@ -86,6 +84,15 @@ defmodule Ant.QueueTest do
   end
 
   describe "concurrency" do
+    test "runs the workers in the order they were enqueued" do
+      queue_name = "enqueued_order"
+      ids = for _ <- 1..4, do: create_worker(queue_name).id
+
+      start_queue(queue_name, concurrency: 4)
+
+      assert started_ids(4) == ids
+    end
+
     test "runs no more workers than the concurrency allows" do
       queue_name = "concurrency_limit"
       for _ <- 1..5, do: create_worker(queue_name)
@@ -201,29 +208,27 @@ defmodule Ant.QueueTest do
   describe "worker process failures" do
     test "reschedules a worker whose process is killed" do
       queue_name = "killed_worker"
-      ids = for _ <- 1..2, do: create_worker(queue_name).id
+      [first, second] = for _ <- 1..2, do: create_worker(queue_name).id
 
       start_queue(queue_name, concurrency: 1)
 
-      assert_receive {:started, id, pid}, 1_000
-      assert id in ids
+      assert_receive {:started, ^first, pid}, 1_000
 
       # A killed process can not record the failure itself, so the job would
       # stay in the :running status until the next application start.
       #
       Process.exit(pid, :kill)
 
-      assert wait_until(fn -> worker_status(id) == :retrying end)
+      assert wait_until(fn -> worker_status(first) == :retrying end)
 
-      {:ok, killed_worker} = Repo.get(:ant_workers, id)
+      {:ok, killed_worker} = Repo.get(:ant_workers, first)
       assert [error] = killed_worker.errors
       assert error.error =~ "Worker process terminated"
       assert error.attempt == 1
 
       # The slot is released as well.
       #
-      assert_receive {:started, next_id, _pid}, 1_000
-      assert next_id == Enum.find(ids, &(&1 != id))
+      assert_receive {:started, ^second, _pid}, 1_000
     end
 
     test "fails a killed worker that has no attempts left" do

@@ -48,28 +48,50 @@ defmodule Ant.Workers do
   def list_scheduled_workers(clauses, date_time \\ DateTime.utc_now(), opts \\ []),
     do: list_due_workers(clauses, :scheduled, date_time, opts)
 
+  @spec list_enqueued_workers(map(), DateTime.t(), keyword()) :: {:ok, [Ant.Worker.t()]}
+  def list_enqueued_workers(clauses, date_time \\ DateTime.utc_now(), opts \\ []),
+    do: list_due_workers(clauses, :enqueued, date_time, opts)
+
+  # Only the columns needed to decide whether a worker can be removed, so a
+  # cleanup pass does not have to load every job's args and stack traces.
+  #
+  @spec list_worker_timestamps() :: {:ok, [map()]}
+  def list_worker_timestamps,
+    do: {:ok, Repo.select_columns(:ant_workers, %{}, [:id, :updated_at, :scheduled_at])}
+
   @spec get_worker(integer()) :: {:ok, Ant.Worker.t()} | {:error, atom()}
   def get_worker(id), do: Repo.get(:ant_workers, id)
 
-  @spec delete_worker(Ant.Worker.t()) :: :ok
+  @spec delete_worker(Ant.Worker.t() | map()) :: :ok
   def delete_worker(worker), do: Repo.delete(:ant_workers, worker.id)
 
   # The limit must be applied only after rejecting workers that are not due yet
-  # and sorting by scheduled_at. Applying it at fetch time returns an arbitrary
-  # subset: newer workers could starve older ones, and workers scheduled in the
-  # future could consume the limit, hiding workers that are already due.
+  # and sorting. Applying it at fetch time returns an arbitrary subset: newer
+  # workers could starve older ones, and workers scheduled in the future could
+  # consume the limit, hiding workers that are already due.
   #
   defp list_due_workers(clauses, status, date_time, opts) do
     with {:ok, workers} <- list_workers(Map.put(clauses, :status, status)) do
       due_workers =
         workers
-        |> Enum.reject(&(DateTime.compare(&1.scheduled_at, date_time) == :gt))
-        |> Enum.sort_by(& &1.scheduled_at, DateTime)
+        |> Enum.filter(&due?(&1, date_time))
+        |> Enum.sort_by(&due_order/1)
         |> maybe_limit(Keyword.get(opts, :limit))
 
       {:ok, due_workers}
     end
   end
+
+  defp due?(%{scheduled_at: nil}, _date_time), do: true
+  defp due?(%{scheduled_at: at}, date_time), do: DateTime.compare(at, date_time) != :gt
+
+  # Oldest first, and by id for workers due at the same time - ids come from a
+  # sequential counter, so that is the order the workers were created in.
+  #
+  defp due_order(%{scheduled_at: nil, id: id}), do: {0, id}
+
+  defp due_order(%{scheduled_at: scheduled_at, id: id}),
+    do: {DateTime.to_unix(scheduled_at, :microsecond), id}
 
   defp maybe_limit(workers, limit) when is_integer(limit) and limit > 0,
     do: Enum.take(workers, limit)

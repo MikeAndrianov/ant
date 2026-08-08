@@ -27,7 +27,11 @@ defmodule Ant.Database.Setup do
         :errors,
         :opts
       ],
-      type: :set
+      type: :set,
+      # Queues look workers up by status, the uniqueness checker by module.
+      # Without these every lookup scans the whole table, history included.
+      #
+      index: [:status, :worker_module]
     ],
     ant_counters: [
       attributes: [:table_name, :count],
@@ -162,6 +166,7 @@ defmodule Ant.Database.Setup do
   def migrate_table!(table, options, persistence_strategy) do
     migrate_storage_type!(table, persistence_strategy)
     migrate_attributes!(table, Keyword.fetch!(options, :attributes))
+    migrate_indexes!(table, Keyword.get(options, :index, []))
   end
 
   defp migrate_storage_type!(table, persistence_strategy) do
@@ -198,6 +203,50 @@ defmodule Ant.Database.Setup do
         )
 
         transform_table!(table, persisted_attributes, attributes)
+    end
+  end
+
+  # Indexes added in a later release have to be created on the existing table,
+  # and ones that are no longer used dropped, so that the persisted table
+  # matches what the queries expect.
+  #
+  defp migrate_indexes!(table, indexes) do
+    attributes = :mnesia.table_info(table, :attributes)
+
+    persisted_indexes =
+      table
+      |> :mnesia.table_info(:index)
+      # Index positions count the record name, which is not an attribute.
+      #
+      |> Enum.map(&Enum.at(attributes, &1 - 2))
+
+    Enum.each(indexes -- persisted_indexes, &add_index!(table, &1))
+    Enum.each(persisted_indexes -- indexes, &delete_index!(table, &1))
+  end
+
+  defp add_index!(table, index) do
+    case :mnesia.add_table_index(table, index) do
+      {:atomic, :ok} ->
+        :ok
+
+      {:aborted, {:already_exists, ^table, _position}} ->
+        :ok
+
+      {:aborted, reason} ->
+        raise "Ant could not index #{table}.#{index}: #{inspect(reason)}."
+    end
+  end
+
+  defp delete_index!(table, index) do
+    case :mnesia.del_table_index(table, index) do
+      {:atomic, :ok} ->
+        :ok
+
+      {:aborted, {:no_exists, ^table, _position}} ->
+        :ok
+
+      {:aborted, reason} ->
+        raise "Ant could not remove the index on #{table}.#{index}: #{inspect(reason)}."
     end
   end
 

@@ -69,6 +69,56 @@ defmodule Ant.Database.Adapters.MnesiaTest do
     assert Mnesia.filter(:ant_workers, %{args: %{another_attr: 2}}) == []
   end
 
+  test "filter/3 reads by primary key when the id is given" do
+    {:ok, record} = insert_record(status: "running")
+    insert_record(status: "running")
+
+    assert [found] = Mnesia.filter(:ant_workers, %{id: record.id})
+    assert found.id == record.id
+
+    # The remaining clauses are applied to the row that was read.
+    #
+    assert Mnesia.filter(:ant_workers, %{id: record.id, status: "cancelled"}) == []
+  end
+
+  test "filter/3 reads through an index when an indexed column is given" do
+    # :status is indexed, :attempts is not.
+    #
+    {:ok, record} = insert_record(status: "cancelled", attempts: 7)
+    insert_record(status: "running", attempts: 7)
+
+    assert [found] = Mnesia.filter(:ant_workers, %{status: "cancelled", attempts: 7})
+    assert found.id == record.id
+
+    assert Mnesia.filter(:ant_workers, %{status: "cancelled", attempts: 1}) == []
+  end
+
+  test "filter/3 applies the limit to indexed and scanned lookups alike" do
+    for _ <- 1..5, do: insert_record(status: "running")
+
+    assert length(Mnesia.filter(:ant_workers, %{status: "running"}, limit: 2)) == 2
+    assert length(Mnesia.filter(:ant_workers, %{attempts: 0}, limit: 2)) == 2
+    assert length(Mnesia.filter(:ant_workers, %{}, limit: 3)) == 3
+    assert Mnesia.filter(:ant_workers, %{}, limit: 0) == []
+  end
+
+  test "select_columns/3 returns only the requested columns" do
+    {:ok, record} = insert_record(status: "running")
+
+    assert [row] = Mnesia.select_columns(:ant_workers, %{status: "running"}, [:id, :attempts])
+
+    assert row == %{id: record.id, attempts: 0}
+  end
+
+  test "select_columns/3 keeps the columns it filtered by" do
+    insert_record(status: "running")
+    insert_record(status: "cancelled")
+
+    assert [row] = Mnesia.select_columns(:ant_workers, %{status: "cancelled"}, [:id, :status])
+
+    assert row.status == "cancelled"
+  end
+
   test "delete/2 deletes record" do
     {:ok, record} = insert_record()
 

@@ -174,7 +174,7 @@ defmodule Ant.Queue do
   defp fetch_enqueued_workers(_queue_name, 0), do: {:ok, []}
 
   defp fetch_enqueued_workers(queue_name, limit) do
-    Workers.list_workers(%{queue_name: queue_name, status: :enqueued}, limit: limit)
+    Workers.list_enqueued_workers(%{queue_name: queue_name}, DateTime.utc_now(), limit: limit)
   end
 
   defp schedule_check(state), do: schedule_check(state, state.check_interval)

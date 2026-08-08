@@ -3,16 +3,6 @@ defmodule Ant.WorkerTest do
 
   use ExUnit.Case
   use MnesiaTesting
-  use Mimic
-
-  setup do
-    Mimic.copy(Ant.Queue)
-
-    :ok
-  end
-
-  setup :set_mimic_global
-  setup :verify_on_exit!
 
   defmodule MyTestWorker do
     use Ant.Worker
@@ -117,12 +107,6 @@ defmodule Ant.WorkerTest do
         |> MyTestWorker.build()
         |> Ant.Workers.create_worker()
 
-      expect(Ant.Queue, :dequeue, fn worker_to_dequeue ->
-        assert worker_to_dequeue.id == worker.id
-
-        :ok
-      end)
-
       {:ok, pid} = Worker.start_link(worker)
 
       assert Worker.perform(pid) == :ok
@@ -144,12 +128,6 @@ defmodule Ant.WorkerTest do
         %{a: 1}
         |> FailOnceWorker.build()
         |> Ant.Workers.create_worker()
-
-      expect(Ant.Queue, :dequeue, fn worker_to_dequeue ->
-        assert worker_to_dequeue.id == worker.id
-
-        :ok
-      end)
 
       {:ok, pid} = Worker.start_link(worker)
 
@@ -180,12 +158,6 @@ defmodule Ant.WorkerTest do
         |> Map.from_struct()
 
       {:ok, worker} = Ant.Repo.insert(:ant_workers, worker_params)
-
-      expect(Ant.Queue, :dequeue, fn worker_to_dequeue ->
-        assert worker_to_dequeue.id == worker.id
-
-        :ok
-      end)
 
       {:ok, pid} = Worker.start_link(worker)
 
@@ -226,12 +198,6 @@ defmodule Ant.WorkerTest do
 
       {:ok, worker} = Ant.Repo.insert(:ant_workers, worker_params)
 
-      expect(Ant.Queue, :dequeue, fn worker_to_dequeue ->
-        assert worker_to_dequeue.id == worker.id
-
-        :ok
-      end)
-
       {:ok, pid} = Worker.start_link(worker)
 
       assert Worker.perform(pid) == :ok
@@ -263,12 +229,6 @@ defmodule Ant.WorkerTest do
         |> ThrowWorker.build()
         |> Ant.Workers.create_worker()
 
-      expect(Ant.Queue, :dequeue, fn worker_to_dequeue ->
-        assert worker_to_dequeue.id == worker.id
-
-        :ok
-      end)
-
       {:ok, pid} = Worker.start_link(worker)
 
       assert Worker.perform(pid) == :ok
@@ -292,12 +252,6 @@ defmodule Ant.WorkerTest do
         %{a: 1}
         |> ExitWorker.build()
         |> Ant.Workers.create_worker()
-
-      expect(Ant.Queue, :dequeue, fn worker_to_dequeue ->
-        assert worker_to_dequeue.id == worker.id
-
-        :ok
-      end)
 
       {:ok, pid} = Worker.start_link(worker)
 
@@ -328,12 +282,6 @@ defmodule Ant.WorkerTest do
 
       {:ok, worker} = Ant.Repo.insert(:ant_workers, worker_params)
 
-      expect(Ant.Queue, :dequeue, fn worker_to_dequeue ->
-        assert worker_to_dequeue.id == worker.id
-
-        :ok
-      end)
-
       {:ok, pid} = Worker.start_link(worker)
 
       assert Worker.perform(pid) == :ok
@@ -356,12 +304,6 @@ defmodule Ant.WorkerTest do
         %{a: 1}
         |> ExceptionWorkerHandlesExceptionWithoutMessage.build()
         |> Ant.Workers.create_worker()
-
-      expect(Ant.Queue, :dequeue, fn worker_to_dequeue ->
-        assert worker_to_dequeue.id == worker.id
-
-        :ok
-      end)
 
       {:ok, pid} = Worker.start_link(worker)
 
@@ -444,12 +386,6 @@ defmodule Ant.WorkerTest do
         ]
       })
       |> Ant.Workers.create_worker()
-
-    expect(Ant.Queue, :dequeue, fn worker_to_dequeue ->
-      assert worker_to_dequeue.id == worker.id
-
-      :ok
-    end)
 
     {:ok, pid} = Worker.start_link(worker)
 

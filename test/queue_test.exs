@@ -1,238 +1,349 @@
 defmodule Ant.QueueTest do
-  alias Ant.Queue
-
   use ExUnit.Case
+  use MnesiaTesting
   use Mimic
 
-  defmodule TestWorker do
-    use Ant.Worker
+  alias Ant.Queue
+  alias Ant.Repo
 
-    def perform(_worker), do: :ok
+  # Workers report to the test process and block until the test tells them how
+  # to finish. This gives every test full control over how long a job "runs",
+  # without sleeping, and lets it observe the queue with real processes.
+  #
+  defmodule ControlledWorker do
+    use Ant.Worker, max_attempts: 3
 
-    def calculate_delay(_worker), do: 0
-  end
+    def perform(worker) do
+      send(worker.args.test_pid, {:started, worker.id, self()})
 
-  setup do
-    Mimic.copy(Ant.Workers)
-    Mimic.copy(Ant.Worker)
-    Mimic.copy(DynamicSupervisor)
-
-    :ok
-  end
-
-  setup :set_mimic_global
-  setup :verify_on_exit!
-
-  test "runs pending workers on start" do
-    running_worker = build_worker(:running)
-    retrying_worker = build_worker(:retrying)
-
-    expect(
-      Ant.Workers,
-      :list_workers,
-      fn %{status: :running, queue_name: "default"} -> {:ok, [running_worker]} end
-    )
-
-    expect(
-      Ant.Workers,
-      :list_retrying_workers,
-      fn %{queue_name: "default"}, _date_time -> {:ok, [retrying_worker]} end
-    )
-
-    expect(Ant.Workers, :update_worker, 2, fn worker_id, %{status: :running} ->
-      worker = if worker_id == running_worker.id, do: running_worker, else: retrying_worker
-
-      {:ok, %{worker | status: :running}}
-    end)
-
-    expect(DynamicSupervisor, :start_child, 2, fn Ant.WorkersSupervisor, child_spec ->
-      assert {
-               Ant.Worker,
-               :start_link,
-               [%Ant.Worker{id: worker_id, status: :running}]
-             } = child_spec.start
-
-      {:ok, :"#{worker_id}_pid"}
-    end)
-
-    test_pid = self()
-
-    expect(Ant.Worker, :perform, 2, fn pid ->
-      send(test_pid, {:worker_performed, pid})
-
-      :ok
-    end)
-
-    {:ok, _pid} = Queue.start_link(queue: "default", config: [check_interval: 10])
-
-    running_worker_pid = :"#{running_worker.id}_pid"
-    retrying_worker_pid = :"#{retrying_worker.id}_pid"
-    assert_receive({:worker_performed, ^running_worker_pid})
-    assert_receive({:worker_performed, ^retrying_worker_pid})
-  end
-
-  describe "periodically checks workers" do
-    test "processes only stuck workers when their count exceeds concurrency limit" do
-      test_pid = self()
-
-      expect(
-        Ant.Workers,
-        :list_workers,
-        fn %{queue_name: "default", status: :running} ->
-          {
-            :ok,
-            [build_worker(1, :running), build_worker(2, :running), build_worker(3, :running)]
-          }
-        end
-      )
-
-      expect(
-        Ant.Workers,
-        :list_retrying_workers,
-        fn %{queue_name: "default"}, _date_time ->
-          {
-            :ok,
-            [build_worker(4, :retrying), build_worker(5, :retrying), build_worker(6, :retrying)]
-          }
-        end
-      )
-
-      interval_in_ms = 5
-
-      expect(Ant.Workers, :update_worker, 4, fn worker_id, %{status: :running} ->
-        {:ok, build_worker(worker_id, :running)}
-      end)
-
-      {:ok, _pid} =
-        Queue.start_link(
-          queue: "default",
-          config: [check_interval: interval_in_ms, concurrency: 2]
-        )
-
-      expect(DynamicSupervisor, :start_child, 4, fn Ant.WorkersSupervisor, child_spec ->
-        assert {
-                 Ant.Worker,
-                 :start_link,
-                 [%Ant.Worker{status: :running, id: id}]
-               } = child_spec.start
-
-        {:ok, :"pid_for_periodic_check_#{id}"}
-      end)
-
-      expect(Ant.Worker, :perform, 4, fn worker_pid ->
-        send(test_pid, {:"#{worker_pid}_performed", :periodic_check})
-
-        :ok
-      end)
-
-      reject(Ant.Workers, :list_workers, 1)
-
-      assert_receive({:pid_for_periodic_check_1_performed, :periodic_check})
-      assert_receive({:pid_for_periodic_check_2_performed, :periodic_check})
-
-      # On the next recurring check
-
-      Process.sleep(interval_in_ms * 2)
-
-      assert_receive({:pid_for_periodic_check_3_performed, :periodic_check})
-      assert_receive({:pid_for_periodic_check_4_performed, :periodic_check})
+      receive do
+        {:finish, result} -> result
+      after
+        5_000 -> {:error, :timed_out}
+      end
     end
 
-    test "runs enqueued and scheduled workers if there is no stuck workers" do
-      test_pid = self()
+    # Long enough to keep a retried job from being picked up again
+    # while the test is still asserting on it.
+    #
+    def calculate_delay(_worker), do: :timer.minutes(1)
+  end
 
-      scheduled_worker = build_worker(1, :scheduled)
-      enqueued_worker = build_worker(2, :enqueued)
+  defmodule SingleAttemptWorker do
+    use Ant.Worker, max_attempts: 1
 
-      expect(
-        Ant.Workers,
-        :list_scheduled_workers,
-        fn %{queue_name: "default"}, _date_time, _opts ->
-          {:ok, [scheduled_worker]}
-        end
-      )
+    defdelegate perform(worker), to: ControlledWorker
+  end
 
-      expect(
-        Ant.Workers,
-        :list_retrying_workers,
-        fn %{queue_name: "default"}, _date_time, _opts ->
-          {:ok, []}
-        end
-      )
+  describe "processing workers" do
+    test "runs an enqueued worker and releases its slot when it finishes" do
+      queue_name = "releases_slot"
+      ids = for _ <- 1..2, do: create_worker(queue_name).id
 
-      expect(
-        Ant.Workers,
-        :list_workers,
-        fn %{queue_name: "default", status: :enqueued}, _opts ->
-          {:ok, [enqueued_worker]}
-        end
-      )
+      queue = start_queue(queue_name, concurrency: 1)
 
-      interval_in_ms = 5
+      assert_receive {:started, id, pid}, 1_000
+      assert id in ids
+      assert worker_status(id) == :running
+      assert processing_worker_ids(queue) == [id]
 
-      expect(Ant.Workers, :update_worker, 2, fn worker_id, %{status: :running} ->
-        worker = if worker_id == scheduled_worker.id, do: scheduled_worker, else: enqueued_worker
+      finish(pid, :ok)
 
-        {:ok, %{worker | status: :running}}
-      end)
+      # The freed slot is taken by the next worker without waiting
+      # for the next scheduled check.
+      #
+      assert_receive {:started, next_id, _pid}, 1_000
+      assert next_id == Enum.find(ids, &(&1 != id))
 
-      {:ok, _pid} = Queue.start_link(queue: "default", config: [check_interval: interval_in_ms])
+      assert wait_until(fn -> worker_status(id) == :completed end)
+      assert processing_worker_ids(queue) == [next_id]
+    end
 
-      expect(DynamicSupervisor, :start_child, 2, fn Ant.WorkersSupervisor, child_spec ->
-        assert {Ant.Worker, :start_link, [%Ant.Worker{id: worker_id, status: :running}]} =
-                 child_spec.start
+    test "runs scheduled, retrying and enqueued workers that are due" do
+      queue_name = "due_workers"
+      past = DateTime.add(DateTime.utc_now(), -60, :second)
 
-        {:ok, :"pid_for_periodic_check_#{worker_id}"}
-      end)
+      scheduled = create_worker(queue_name, %{status: :scheduled, scheduled_at: past})
+      retrying = create_worker(queue_name, %{status: :retrying, scheduled_at: past, attempts: 1})
+      enqueued = create_worker(queue_name)
 
-      expect(Ant.Worker, :perform, 2, fn pid ->
-        periodic_check_enqueued_worker_pid = :"pid_for_periodic_check_#{enqueued_worker.id}"
-        periodic_check_scheduled_worker_pid = :"pid_for_periodic_check_#{scheduled_worker.id}"
+      start_queue(queue_name, concurrency: 3)
 
-        status =
-          case pid do
-            ^periodic_check_enqueued_worker_pid -> :enqueued
-            ^periodic_check_scheduled_worker_pid -> :scheduled
-          end
+      assert Enum.sort(started_ids(3)) == Enum.sort([scheduled.id, retrying.id, enqueued.id])
+    end
 
-        send(test_pid, {:"#{status}_worker_performed", :periodic_check})
+    test "does not run workers that are not due yet" do
+      queue_name = "not_due_workers"
+      future = DateTime.add(DateTime.utc_now(), 60, :second)
 
-        :ok
-      end)
+      create_worker(queue_name, %{status: :scheduled, scheduled_at: future})
+      create_worker(queue_name, %{status: :retrying, scheduled_at: future, attempts: 1})
 
-      # testing periodic check
+      start_queue(queue_name, concurrency: 5)
 
-      Process.sleep(interval_in_ms * 2)
-
-      assert_receive({:enqueued_worker_performed, :periodic_check})
-      assert_receive({:scheduled_worker_performed, :periodic_check})
+      refute_receive {:started, _id, _pid}, 300
     end
   end
 
-  test "can update concurrency on the fly" do
-    {:ok, less} =
-      Queue.start_link(queue: "less", config: [check_interval: 100, concurrency: 1])
+  describe "concurrency" do
+    test "runs no more workers than the concurrency allows" do
+      queue_name = "concurrency_limit"
+      for _ <- 1..5, do: create_worker(queue_name)
 
-    {:ok, more} = Queue.start_link(queue: "more", config: [check_interval: 100, concurrency: 2])
+      # The short interval means several checks happen while the first two
+      # workers are still running: none of them may start anything else.
+      #
+      queue = start_queue(queue_name, concurrency: 2, check_interval: 20)
 
-    assert :sys.get_state(less).concurrency == 1
-    assert :sys.get_state(more).concurrency == 2
+      assert [_, _] = collect_started(2)
+      refute_receive {:started, _id, _pid}, 300
 
-    :ok = Queue.set_concurrency("more", 5)
+      assert length(processing_worker_ids(queue)) == 2
+    end
 
-    assert :sys.get_state(less).concurrency == 1
-    assert :sys.get_state(more).concurrency == 5
+    test "counts running workers against the limit on the next check" do
+      queue_name = "concurrency_across_checks"
+      for _ <- 1..3, do: create_worker(queue_name)
+
+      start_queue(queue_name, concurrency: 2, check_interval: 20)
+
+      assert [{_id, pid} | _] = collect_started(2)
+      finish(pid, :ok)
+
+      # Exactly one slot was released, so exactly one more worker may start.
+      #
+      assert_receive {:started, _id, _pid}, 1_000
+      refute_receive {:started, _id, _pid}, 300
+    end
+
+    test "does not exceed the limit when due scheduled workers fill it" do
+      # `limit: 0` used to mean "no limit", so the enqueued workers below were
+      # all fetched and started after the scheduled ones had filled the limit.
+      #
+      queue_name = "limit_filled_by_scheduled"
+      past = DateTime.add(DateTime.utc_now(), -60, :second)
+
+      scheduled =
+        for _ <- 1..2, do: create_worker(queue_name, %{status: :scheduled, scheduled_at: past})
+
+      for _ <- 1..3, do: create_worker(queue_name)
+
+      start_queue(queue_name, concurrency: 2, check_interval: 20)
+
+      started = started_ids(2)
+      refute_receive {:started, _id, _pid}, 300
+
+      assert Enum.sort(started) == scheduled |> Enum.map(& &1.id) |> Enum.sort()
+    end
+
+    test "can update concurrency on the fly" do
+      {:ok, less} =
+        Queue.start_link(queue: "less", config: [check_interval: 5_000, concurrency: 1])
+
+      {:ok, more} =
+        Queue.start_link(queue: "more", config: [check_interval: 5_000, concurrency: 2])
+
+      on_exit(fn -> Enum.each([less, more], &stop_queue/1) end)
+
+      assert :sys.get_state(less).concurrency == 1
+      assert :sys.get_state(more).concurrency == 2
+
+      :ok = Queue.set_concurrency("more", 5)
+
+      assert :sys.get_state(less).concurrency == 1
+      assert :sys.get_state(more).concurrency == 5
+    end
+
+    test "fills the new slots right after concurrency is raised" do
+      queue_name = "raised_concurrency"
+      for _ <- 1..3, do: create_worker(queue_name)
+
+      start_queue(queue_name, concurrency: 1)
+
+      assert_receive {:started, _id, _pid}, 1_000
+      refute_receive {:started, _id, _pid}, 300
+
+      :ok = Queue.set_concurrency(queue_name, 3)
+
+      assert [_, _] = collect_started(2)
+    end
   end
 
-  defp build_worker(id, status) do
-    status
-    |> build_worker()
-    |> Map.put(:id, id)
+  describe "workers stuck in a non-completed state" do
+    test "runs workers left in the running status on start" do
+      queue_name = "stuck_workers"
+      stuck = create_worker(queue_name, %{status: :running, attempts: 1})
+
+      start_queue(queue_name, concurrency: 5)
+
+      assert_receive {:started, id, _pid}, 1_000
+      assert id == stuck.id
+    end
+
+    test "runs stuck workers before the enqueued ones, within the concurrency" do
+      queue_name = "stuck_workers_priority"
+
+      stuck =
+        for _ <- 1..3, do: create_worker(queue_name, %{status: :running, attempts: 1})
+
+      create_worker(queue_name)
+
+      start_queue(queue_name, concurrency: 2, check_interval: 20)
+
+      started = started_ids(2)
+      refute_receive {:started, _id, _pid}, 300
+
+      stuck_ids = Enum.map(stuck, & &1.id)
+      assert Enum.all?(started, &(&1 in stuck_ids))
+    end
   end
 
-  defp build_worker(status) do
-    %{initial_status: status}
-    |> TestWorker.build()
-    |> Map.merge(%{id: :erlang.unique_integer([:positive]), status: status})
+  describe "worker process failures" do
+    test "reschedules a worker whose process is killed" do
+      queue_name = "killed_worker"
+      ids = for _ <- 1..2, do: create_worker(queue_name).id
+
+      start_queue(queue_name, concurrency: 1)
+
+      assert_receive {:started, id, pid}, 1_000
+      assert id in ids
+
+      # A killed process can not record the failure itself, so the job would
+      # stay in the :running status until the next application start.
+      #
+      Process.exit(pid, :kill)
+
+      assert wait_until(fn -> worker_status(id) == :retrying end)
+
+      {:ok, killed_worker} = Repo.get(:ant_workers, id)
+      assert [error] = killed_worker.errors
+      assert error.error =~ "Worker process terminated"
+      assert error.attempt == 1
+
+      # The slot is released as well.
+      #
+      assert_receive {:started, next_id, _pid}, 1_000
+      assert next_id == Enum.find(ids, &(&1 != id))
+    end
+
+    test "fails a killed worker that has no attempts left" do
+      queue_name = "killed_worker_without_attempts"
+      worker = create_worker(queue_name, %{}, SingleAttemptWorker)
+
+      start_queue(queue_name, concurrency: 1)
+
+      assert_receive {:started, _id, pid}, 1_000
+
+      Process.exit(pid, :kill)
+
+      assert wait_until(fn -> worker_status(worker.id) == :failed end)
+    end
+
+    test "keeps running when a worker process can not be started" do
+      Mimic.copy(DynamicSupervisor)
+      set_mimic_global(%{})
+
+      queue_name = "unstartable_worker"
+      worker = create_worker(queue_name)
+
+      stub(DynamicSupervisor, :start_child, fn Ant.WorkersSupervisor, _child_spec ->
+        {:error, :max_children}
+      end)
+
+      queue = start_queue(queue_name, concurrency: 1, check_interval: 20)
+
+      # The worker is returned to its previous status instead of being left
+      # as :running, and the queue survives to pick it up again.
+      #
+      assert wait_until(fn -> worker_status(worker.id) == :enqueued end)
+      assert Process.alive?(queue)
+      assert processing_worker_ids(queue) == []
+    end
+  end
+
+  # Helpers
+
+  defp start_queue(queue_name, config) do
+    config = Keyword.put_new(config, :check_interval, 5_000)
+    {:ok, queue} = Queue.start_link(queue: queue_name, config: config)
+
+    on_exit(fn ->
+      stop_queue(queue)
+      stop_running_workers()
+    end)
+
+    queue
+  end
+
+  defp stop_queue(queue) do
+    if Process.alive?(queue), do: GenServer.stop(queue)
+  catch
+    :exit, _ -> :ok
+  end
+
+  # Workers blocked in `perform/1` would otherwise outlive the test
+  # and write to the database while the next one is running.
+  #
+  defp stop_running_workers do
+    Ant.WorkersSupervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.each(fn {_, pid, _, _} ->
+      DynamicSupervisor.terminate_child(Ant.WorkersSupervisor, pid)
+    end)
+  end
+
+  defp create_worker(queue_name, attrs \\ %{}, worker_module \\ ControlledWorker) do
+    params =
+      %{test_pid: self()}
+      |> worker_module.build()
+      |> Map.put(:queue_name, queue_name)
+      |> Map.merge(attrs)
+      |> Map.from_struct()
+
+    {:ok, worker} = Repo.insert(:ant_workers, params)
+
+    worker
+  end
+
+  defp finish(worker_pid, result), do: send(worker_pid, {:finish, result})
+
+  # Returns `{worker_id, worker_pid}` for every worker the queue has started.
+  #
+  defp collect_started(count) do
+    Enum.map(1..count, fn _ ->
+      assert_receive {:started, id, pid}, 1_000
+
+      {id, pid}
+    end)
+  end
+
+  defp started_ids(count), do: count |> collect_started() |> Enum.map(&elem(&1, 0))
+
+  defp processing_worker_ids(queue) do
+    queue
+    |> :sys.get_state()
+    |> Map.fetch!(:processing_workers)
+    |> Map.values()
+    |> Enum.sort()
+  end
+
+  defp worker_status(worker_id) do
+    {:ok, worker} = Repo.get(:ant_workers, worker_id)
+
+    worker.status
+  end
+
+  defp wait_until(fun, timeout \\ 1_000)
+
+  defp wait_until(_fun, timeout) when timeout <= 0, do: false
+
+  defp wait_until(fun, timeout) do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+
+      wait_until(fun, timeout - 10)
+    end
   end
 end

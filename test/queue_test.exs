@@ -176,6 +176,87 @@ defmodule Ant.QueueTest do
     end
   end
 
+  describe "looking up scheduled workers" do
+    setup do
+      Mimic.copy(Ant.Workers)
+      set_mimic_global(%{})
+
+      :ok
+    end
+
+    test "a busy queue looks them up once per check interval, not after every job" do
+      # Finding the due ones means reading every scheduled worker, and there can
+      # be hundreds of thousands of delayed jobs.
+      #
+      queue_name = "scheduled_lookups_when_busy"
+      ids = for _ <- 1..3, do: create_worker(queue_name).id
+      test_pid = self()
+
+      stub(Ant.Workers, :list_scheduled_workers, fn clauses, date_time, opts ->
+        send(test_pid, :scheduled_lookup)
+        Mimic.call_original(Ant.Workers, :list_scheduled_workers, [clauses, date_time, opts])
+      end)
+
+      start_queue(queue_name, concurrency: 1)
+
+      for id <- ids do
+        assert_receive {:started, ^id, pid}, 1_000
+        finish(pid, :ok)
+      end
+
+      assert_received :scheduled_lookup
+      refute_receive :scheduled_lookup, 300
+    end
+
+    test "a busy queue still runs a scheduled worker within the check interval" do
+      queue_name = "scheduled_due_while_busy"
+      enqueued_ids = for _ <- 1..30, do: create_worker(queue_name).id
+      due_at = DateTime.add(DateTime.utc_now(), 50, :millisecond)
+      scheduled = create_worker(queue_name, %{status: :scheduled, scheduled_at: due_at})
+
+      start_queue(queue_name, concurrency: 1, check_interval: 100)
+
+      # Every enqueued worker takes ~10ms, so the queue stays busy for longer
+      # than the scheduled worker may wait.
+      #
+      started = run_until_started(scheduled.id)
+
+      assert length(started) < length(enqueued_ids)
+    end
+
+    test "they are looked up again while they fill every free slot" do
+      queue_name = "scheduled_backlog"
+      past = DateTime.add(DateTime.utc_now(), -60, :second)
+
+      scheduled_ids =
+        for _ <- 1..3, do: create_worker(queue_name, %{status: :scheduled, scheduled_at: past}).id
+
+      enqueued = create_worker(queue_name)
+
+      start_queue(queue_name, concurrency: 1)
+
+      started =
+        for _ <- 1..4 do
+          assert_receive {:started, id, pid}, 1_000
+          finish(pid, :ok)
+          id
+        end
+
+      assert started == scheduled_ids ++ [enqueued.id]
+    end
+
+    test "an idle queue runs a scheduled worker once it is due" do
+      queue_name = "scheduled_due_while_idle"
+      due_at = DateTime.add(DateTime.utc_now(), 100, :millisecond)
+      scheduled = create_worker(queue_name, %{status: :scheduled, scheduled_at: due_at})
+
+      start_queue(queue_name, concurrency: 1, check_interval: 50)
+
+      id = scheduled.id
+      assert_receive {:started, ^id, _pid}, 1_000
+    end
+  end
+
   describe "concurrency" do
     test "runs the workers in the order they were enqueued" do
       queue_name = "enqueued_order"
@@ -444,6 +525,22 @@ defmodule Ant.QueueTest do
   end
 
   defp started_ids(count), do: count |> collect_started() |> Enum.map(&elem(&1, 0))
+
+  # Lets every worker that starts run for ~10ms and complete, until the worker
+  # with `id` starts. Returns the ids of the workers that ran before it.
+  #
+  defp run_until_started(id, started \\ []) do
+    assert_receive {:started, started_id, pid}, 1_000
+
+    if started_id == id do
+      Enum.reverse(started)
+    else
+      Process.sleep(10)
+      finish(pid, :ok)
+
+      run_until_started(id, [started_id | started])
+    end
+  end
 
   defp processing_worker_ids(queue) do
     queue

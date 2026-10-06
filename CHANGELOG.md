@@ -7,6 +7,10 @@
 - Delayed jobs through per-job `schedule_in` (milliseconds) or `schedule_at` (UTC-normalized `DateTime`) options on `perform_async/2` and `build/2`, without consuming an attempt before the scheduled time
 - `Ant.Workers.cancel_worker/1`, to cancel an enqueued, scheduled or retrying job before it runs
 
+### Changed
+
+- Queues look for due scheduled jobs once per `check_interval`, rather than every time one of their jobs finishes: finding them means reading every scheduled job, which slowed busy queues down by more than ten times with 10,000 delayed jobs
+
 ### Fixed
 
 - Retention cleanup only removes expired completed, failed or cancelled jobs, preserving active jobs even when overdue; eligibility is rechecked under a transaction lock before deletion

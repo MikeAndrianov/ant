@@ -281,6 +281,16 @@ defmodule Ant.WorkersTest do
       assert created_worker.status == :enqueued
     end
 
+    test "scheduled jobs participate in active job uniqueness" do
+      args = %{email: "scheduled@example.com"}
+      assert {:ok, worker} = UniqueTestWorker.perform_async(args, schedule_in: 86_400_000)
+      assert worker.status == :scheduled
+      assert UniqueTestWorker.perform_async(args) == {:error, :already_exists}
+
+      assert UniqueTestWorker.perform_async(args, schedule_in: 172_800_000) ==
+               {:error, :already_exists}
+    end
+
     test "returns error when uniqueness check fails" do
       worker = TestWorker.build(%{email: "test@example.com"})
 

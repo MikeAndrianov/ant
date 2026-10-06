@@ -14,7 +14,7 @@ defmodule Ant.Workers do
   def create_worker(worker) do
     params = %{
       worker_module: worker.worker_module,
-      status: :enqueued,
+      status: if(worker.status == :scheduled, do: :scheduled, else: :enqueued),
       attempts: 0,
       queue_name: worker.queue_name,
       args: worker.args,

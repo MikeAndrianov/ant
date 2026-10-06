@@ -38,6 +38,47 @@ Create a job to be processed asynchronously:
 
 Note that the function to create a job is named `perform_async` and not `perform`. It returns a tuple with `:ok` and a worker struct.
 
+### Delayed jobs
+
+Schedule a job without running it or recording a failed attempt first:
+
+```elixir
+{:ok, worker} = SupplierReminderWorker.perform_async(
+  %{order_id: order.id},
+  schedule_in: :timer.hours(24 * 5)
+)
+
+# Or provide an absolute time:
+SupplierReminderWorker.perform_async(
+  %{order_id: order.id},
+  schedule_at: ~U[2026-10-11 09:00:00Z]
+)
+```
+
+`schedule_in` is a non-negative integer in **milliseconds**, consistent with Ant's
+timeout and retry delay options. `schedule_at` accepts a timezone-aware `DateTime`
+and normalizes it to UTC. Use only one of these options per job; both are also
+accepted by `build/2`. They are per-job options, not `use Ant.Worker` defaults.
+
+Future jobs have status `:scheduled`, zero attempts and no errors until they run.
+A zero delay or a timestamp in the past makes the job immediately eligible.
+Without either option, `perform_async/2` behaves as before. Invalid scheduling
+options return `{:error, {:invalid_schedule, reason}}`; `build/2` raises
+`ArgumentError` instead.
+
+The timestamp is the earliest the job may run. Queue polling (every five seconds
+by default) and available capacity can delay execution. Once the job runs, its
+normal timeout and retry policy apply.
+
+For reminders, reload the order in `perform/1`: return `:ok` if the supplier has
+already responded, otherwise send the notification. Make the notification
+idempotent where possible, since a crash can cause a job to execute again.
+
+To keep scheduled jobs across VM restarts, configure disk-backed Mnesia
+(`:disc_copies` or `:disc_only_copies`) as described below. The default
+`:ram_copies` storage is in memory. Persisted overdue jobs are picked up when Ant
+resumes; there is no need to keep a process or timer alive for each delayed job.
+
 ## Configuration
 
 You can configure the library to make it more suitable for your use case.

@@ -83,6 +83,44 @@ defmodule Ant.QueueTest do
     end
   end
 
+  defmodule DelayedWorker do
+    use Ant.Worker, queue: "delayed_public_api", max_attempts: 2
+
+    defdelegate perform(worker), to: ControlledWorker
+    def calculate_delay(_worker), do: 0
+  end
+
+  describe "delayed jobs through the public API" do
+    test "waits across queue restarts, then executes an overdue job and retries normally" do
+      {:ok, worker} = DelayedWorker.perform_async(%{test_pid: self()}, schedule_in: 86_400_000)
+      queue = start_queue("delayed_public_api", concurrency: 1)
+      refute_receive {:started, _, _}, 100
+      assert processing_worker_ids(queue) == []
+      stop_queue(queue)
+
+      restarted = start_queue("delayed_public_api", concurrency: 1)
+      refute_receive {:started, _, _}, 100
+
+      assert {:ok, %{status: :scheduled, attempts: 0, errors: []}} =
+               Repo.get(:ant_workers, worker.id)
+
+      stop_queue(restarted)
+
+      # Advance the persisted deadline instead of waiting a day in this test.
+      {:ok, _} = Ant.Workers.update_worker(worker.id, %{scheduled_at: ~U[2000-01-01 00:00:00Z]})
+      start_queue("delayed_public_api", concurrency: 1)
+      id = worker.id
+      assert_receive {:started, ^id, first_pid}, 1_000
+      assert {:ok, %{attempts: 1, errors: [], scheduled_at: nil}} = Repo.get(:ant_workers, id)
+      finish(first_pid, :error)
+
+      assert_receive {:started, ^id, retry_pid}, 1_000
+      assert {:ok, %{attempts: 2, errors: [_]}} = Repo.get(:ant_workers, id)
+      finish(retry_pid, :ok)
+      assert wait_until(fn -> worker_status(id) == :completed end)
+    end
+  end
+
   describe "concurrency" do
     test "runs the workers in the order they were enqueued" do
       queue_name = "enqueued_order"

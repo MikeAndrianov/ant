@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Delayed jobs through per-job `schedule_in` (milliseconds) or `schedule_at` (UTC-normalized `DateTime`) options on `perform_async/2` and `build/2`, without consuming an attempt before the scheduled time
+
 ## [1.0.0]
 
 Stability release: jobs are no longer lost, duplicated or run past their limits, and queues keep up with large backlogs.

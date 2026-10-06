@@ -26,6 +26,14 @@ defmodule Ant.Worker do
       Defaults to `:infinity`.
     * `:unique` - prevents duplicate jobs, see `Ant.WorkerUniquenessChecker`.
 
+  Per-job options accepted by `perform_async/2` and `build/2` also include
+  `:schedule_in` (a non-negative delay in milliseconds) or `:schedule_at`
+  (a `DateTime`, normalized to UTC). They cannot be combined. Future jobs wait
+  in `:scheduled` without consuming attempts; zero delays and past timestamps
+  are immediately eligible. Execution can be later because of queue polling
+  and capacity. Invalid scheduling options return `{:error, {:invalid_schedule,
+  reason}}` from `perform_async/2`, or raise `ArgumentError` from `build/2`.
+
   The delay before a retry defaults to ten seconds times the number of attempts
   made, and can be replaced by implementing the optional `calculate_delay/1`
   callback.
@@ -57,7 +65,7 @@ defmodule Ant.Worker do
           status:
             :enqueued | :running | :scheduled | :completed | :failed | :retrying | :cancelled,
           attempts: non_neg_integer(),
-          scheduled_at: DateTime.t(),
+          scheduled_at: DateTime.t() | nil,
           updated_at: DateTime.t(),
           errors: [map()],
           opts: keyword()
@@ -91,31 +99,79 @@ defmodule Ant.Worker do
       @spec perform_async(args :: map(), opts :: keyword()) ::
               {:ok, Ant.Worker.t()} | {:error, any()}
       def perform_async(args, opts \\ []) do
-        args
-        |> build(opts)
-        |> Workers.create_worker()
+        with {:ok, worker} <- ant_build_worker(args, opts) do
+          Workers.create_worker(worker)
+        end
       end
 
       def build(args, opts \\ []) do
+        case ant_build_worker(args, opts) do
+          {:ok, worker} -> worker
+          {:error, {:invalid_schedule, reason}} -> raise ArgumentError, reason
+        end
+      end
+
+      defp ant_build_worker(args, opts) do
         opts =
           opts
           |> Keyword.put_new(:max_attempts, unquote(max_attempts))
           |> Keyword.put_new(:timeout, unquote(timeout))
           |> Keyword.put_new(:unique, unquote(unique))
 
-        %Ant.Worker{
-          worker_module: __MODULE__,
-          args: args,
-          queue_name: unquote(queue_name),
-          status: :enqueued,
-          attempts: 0,
-          scheduled_at: DateTime.utc_now(),
-          errors: [],
-          opts: opts
-        }
+        with {:ok, status, scheduled_at} <- Ant.Worker.schedule(opts) do
+          {:ok,
+           %Ant.Worker{
+             worker_module: __MODULE__,
+             args: args,
+             queue_name: unquote(queue_name),
+             status: status,
+             attempts: 0,
+             scheduled_at: scheduled_at,
+             errors: [],
+             opts: opts
+           }}
+        end
       end
     end
   end
+
+  @doc false
+  @spec schedule(keyword(), DateTime.t()) ::
+          {:ok, :enqueued | :scheduled, DateTime.t()} | {:error, {:invalid_schedule, String.t()}}
+  def schedule(opts, now \\ DateTime.utc_now()) do
+    case {Keyword.fetch(opts, :schedule_in), Keyword.fetch(opts, :schedule_at)} do
+      {:error, :error} -> {:ok, :enqueued, now}
+      {{:ok, delay}, :error} -> schedule_in(delay, now)
+      {:error, {:ok, at}} -> schedule_at(at, now)
+      _ -> invalid_schedule("schedule_in and schedule_at cannot be combined")
+    end
+  end
+
+  defp schedule_in(delay, now) when is_integer(delay) and delay >= 0 do
+    if delay <= DateTime.diff(~U[9999-12-31 23:59:59.999999Z], now, :millisecond) do
+      schedule_at(DateTime.add(now, delay, :millisecond), now)
+    else
+      invalid_schedule("schedule_in is outside the supported DateTime range")
+    end
+  end
+
+  defp schedule_in(_delay, _now),
+    do: invalid_schedule("schedule_in must be a non-negative integer in milliseconds")
+
+  defp schedule_at(%DateTime{} = at, now) do
+    case DateTime.shift_zone(at, "Etc/UTC") do
+      {:ok, utc} ->
+        status = if DateTime.compare(utc, now) == :gt, do: :scheduled, else: :enqueued
+        {:ok, status, utc}
+
+      {:error, reason} ->
+        invalid_schedule("schedule_at cannot be converted to UTC: #{inspect(reason)}")
+    end
+  end
+
+  defp schedule_at(_at, _now), do: invalid_schedule("schedule_at must be a DateTime")
+
+  defp invalid_schedule(reason), do: {:error, {:invalid_schedule, reason}}
 
   # Returns the name of the first queue from the configuration.
   # Queues can be configured as a keyword list (`[default: [concurrency: 5]]`)

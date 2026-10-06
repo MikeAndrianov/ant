@@ -54,10 +54,12 @@ defmodule Ant.Workers do
   def update_worker(id, params), do: Repo.update(:ant_workers, id, params)
 
   @doc """
-  Cancels a job that has not started running yet, so that it never runs.
+  Cancels the given job, if it has not started running yet, so that it never
+  runs. Takes the job or its id.
 
-  Enqueued, scheduled and retrying jobs move to the `:cancelled` status, and are
-  then retained like completed and failed ones. Takes the job or its id.
+  Only the job passed in is affected: if it is enqueued, scheduled or retrying,
+  it is moved to the `:cancelled` status, and then retained like completed and
+  failed jobs. No job is ever cancelled other than through this function.
 
   Returns `{:ok, worker}` with the cancelled job, also when it was already
   cancelled. A job that is running, completed or failed is left as it is, and

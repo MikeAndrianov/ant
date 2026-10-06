@@ -119,6 +119,61 @@ defmodule Ant.QueueTest do
       finish(retry_pid, :ok)
       assert wait_until(fn -> worker_status(id) == :completed end)
     end
+
+    test "never runs a delayed job cancelled before it is due" do
+      {:ok, worker} = DelayedWorker.perform_async(%{test_pid: self()}, schedule_in: 86_400_000)
+      assert {:ok, %{status: :cancelled}} = Ant.Workers.cancel_worker(worker)
+
+      # Its time comes, but it stays cancelled.
+      {:ok, _} = Ant.Workers.update_worker(worker.id, %{scheduled_at: ~U[2000-01-01 00:00:00Z]})
+      start_queue("delayed_public_api", concurrency: 1)
+
+      refute_receive {:started, _id, _pid}, 300
+      assert {:ok, %{status: :cancelled, attempts: 0}} = Repo.get(:ant_workers, worker.id)
+    end
+  end
+
+  describe "workers changed after they were listed" do
+    setup do
+      Mimic.copy(Ant.Workers)
+      set_mimic_global(%{})
+
+      :ok
+    end
+
+    test "does not run a worker cancelled before the queue marks it as running" do
+      queue_name = "cancelled_after_listing"
+      past = DateTime.add(DateTime.utc_now(), -60, :second)
+      scheduled = create_worker(queue_name, %{status: :scheduled, scheduled_at: past})
+      enqueued = create_worker(queue_name)
+
+      after_listing_scheduled(fn ->
+        {:ok, %{status: :cancelled}} = Ant.Workers.cancel_worker(scheduled)
+      end)
+
+      start_queue(queue_name, concurrency: 2)
+
+      enqueued_id = enqueued.id
+      assert_receive {:started, ^enqueued_id, _pid}, 1_000
+      refute_receive {:started, _id, _pid}, 300
+      assert worker_status(scheduled.id) == :cancelled
+    end
+
+    test "skips a worker deleted before the queue marks it as running" do
+      queue_name = "deleted_after_listing"
+      past = DateTime.add(DateTime.utc_now(), -60, :second)
+      scheduled = create_worker(queue_name, %{status: :scheduled, scheduled_at: past})
+      enqueued = create_worker(queue_name)
+
+      after_listing_scheduled(fn -> :ok = Ant.Workers.delete_worker(scheduled) end)
+
+      queue = start_queue(queue_name, concurrency: 2)
+
+      enqueued_id = enqueued.id
+      assert_receive {:started, ^enqueued_id, _pid}, 1_000
+      assert Process.alive?(queue)
+      assert processing_worker_ids(queue) == [enqueued_id]
+    end
   end
 
   describe "concurrency" do
@@ -364,6 +419,19 @@ defmodule Ant.QueueTest do
   end
 
   defp finish(worker_pid, result), do: send(worker_pid, {:finish, result})
+
+  # Runs `fun` right after the queue has listed the scheduled workers to start,
+  # and before it marks any of them as running.
+  #
+  defp after_listing_scheduled(fun) do
+    expect(Ant.Workers, :list_scheduled_workers, fn clauses, date_time, opts ->
+      result =
+        Mimic.call_original(Ant.Workers, :list_scheduled_workers, [clauses, date_time, opts])
+
+      fun.()
+      result
+    end)
+  end
 
   # Returns `{worker_id, worker_pid}` for every worker the queue has started.
   #

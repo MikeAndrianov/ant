@@ -33,6 +33,8 @@ defmodule Ant.Worker do
   are immediately eligible. Execution can be later because of queue polling
   and capacity. Invalid scheduling options return `{:error, {:invalid_schedule,
   reason}}` from `perform_async/2`, or raise `ArgumentError` from `build/2`.
+  A job that has not started running can be cancelled with
+  `Ant.Workers.cancel_worker/1`.
 
   The delay before a retry defaults to ten seconds times the number of attempts
   made, and can be replaced by implementing the optional `calculate_delay/1`

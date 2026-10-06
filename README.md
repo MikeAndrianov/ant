@@ -79,6 +79,29 @@ To keep scheduled jobs across VM restarts, configure disk-backed Mnesia
 `:ram_copies` storage is in memory. Persisted overdue jobs are picked up when Ant
 resumes; there is no need to keep a process or timer alive for each delayed job.
 
+### Cancelling jobs
+
+A job that hasn't started running yet can be cancelled, for example once the
+supplier has responded and the reminder is no longer needed. Pass the job, or
+its id, to `Ant.Workers.cancel_worker/1`:
+
+```elixir
+Ant.Workers.cancel_worker(worker)
+# => {:ok, %Ant.Worker{status: :cancelled, ...}}
+
+# Or by id, for example one stored with the order:
+Ant.Workers.cancel_worker(order.reminder_job_id)
+```
+
+Enqueued, scheduled and retrying jobs can be cancelled; their queue will not run
+them. Cancelling an already cancelled job returns it unchanged. A running job
+isn't stopped part of the way through: for it, as for completed and failed jobs,
+`{:error, {:not_cancellable, status}}` is returned and the job is left as it is.
+Cancelled jobs are retained like completed and failed ones.
+
+A cancellation can come just too late, when the job has started, which is why a
+reminder should still check the order in `perform/1` as described above.
+
 ## Configuration
 
 You can configure the library to make it more suitable for your use case.
@@ -379,4 +402,5 @@ Supported options:
   ```
 
 2. `Ant.Workers.get_worker(id)` - returns a worker by id
-3. `Ant.Workers.delete_worker(worker)` - deletes a worker. It's not recommended to use this function directly.
+3. `Ant.Workers.cancel_worker(worker)` - cancels a job that hasn't started running yet, see [Cancelling jobs](#cancelling-jobs)
+4. `Ant.Workers.delete_worker(worker)` - deletes a worker. It's not recommended to use this function directly.

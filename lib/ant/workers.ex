@@ -11,6 +11,7 @@ defmodule Ant.Workers do
   alias Ant.WorkerUniquenessChecker
 
   @terminal_statuses [:completed, :failed, :cancelled]
+  @cancellable_statuses [:enqueued, :scheduled, :retrying]
 
   @spec create_worker(Ant.Worker.t()) :: {:ok, Ant.Worker.t()} | {:error, any()}
   def create_worker(worker) do
@@ -51,6 +52,64 @@ defmodule Ant.Workers do
 
   @spec update_worker(integer(), map()) :: {:ok, Ant.Worker.t()} | {:error, any()}
   def update_worker(id, params), do: Repo.update(:ant_workers, id, params)
+
+  @doc """
+  Cancels a job that has not started running yet, so that it never runs.
+
+  Enqueued, scheduled and retrying jobs move to the `:cancelled` status, and are
+  then retained like completed and failed ones. Takes the job or its id.
+
+  Returns `{:ok, worker}` with the cancelled job, also when it was already
+  cancelled. A job that is running, completed or failed is left as it is, and
+  `{:error, {:not_cancellable, status}}` is returned: a running job can not be
+  stopped part of the way through.
+  """
+  @spec cancel_worker(Ant.Worker.t() | map() | integer()) ::
+          {:ok, Ant.Worker.t()} | {:error, any()}
+  def cancel_worker(%{id: id}), do: cancel_worker(id)
+
+  # The status is checked and changed under a lock on the job, which is also
+  # taken when a queue marks the job as running (see mark_running/1): either the
+  # job is cancelled before its queue gets to it, or it is already running.
+  #
+  def cancel_worker(id) do
+    Repo.transaction(fn ->
+      :ok = Repo.lock(:ant_workers, id)
+
+      case get_worker(id) do
+        {:ok, %{status: status}} when status in @cancellable_statuses ->
+          update_worker(id, %{status: :cancelled})
+
+        {:ok, %{status: :cancelled} = worker} ->
+          {:ok, worker}
+
+        {:ok, %{status: status}} ->
+          {:error, {:not_cancellable, status}}
+
+        error ->
+          error
+      end
+    end)
+  end
+
+  # A queue lists the workers to start, then marks each one as running. Marking
+  # it unconditionally ran workers cancelled in between, and failed on (and
+  # crashed the queue over) the ones deleted in between. So the status is only
+  # changed while it is still the one the worker was listed with.
+  #
+  @doc false
+  @spec mark_running(Ant.Worker.t()) :: {:ok, Ant.Worker.t()} | {:error, any()}
+  def mark_running(%{id: id, status: status}) do
+    Repo.transaction(fn ->
+      :ok = Repo.lock(:ant_workers, id)
+
+      case get_worker(id) do
+        {:ok, %{status: ^status}} -> update_worker(id, %{status: :running})
+        {:ok, %{status: current_status}} -> {:error, {:status_changed, current_status}}
+        error -> error
+      end
+    end)
+  end
 
   @spec list_workers() :: {:ok, [Ant.Worker.t()]}
   @spec list_workers(keyword() | map()) :: {:ok, [Ant.Worker.t()]}

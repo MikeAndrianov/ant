@@ -232,8 +232,18 @@ defmodule Ant.Queue do
   end
 
   defp run_worker(worker, state) do
-    {:ok, running_worker} = Workers.update_worker(worker.id, %{status: :running})
+    case Workers.mark_running(worker) do
+      {:ok, running_worker} ->
+        start_worker(worker, running_worker, state)
 
+      # Changed (e.g. cancelled) or deleted since it was listed: it must not run.
+      #
+      {:error, _reason} ->
+        state
+    end
+  end
+
+  defp start_worker(worker, running_worker, state) do
     child_spec = Supervisor.child_spec({Ant.Worker, running_worker}, restart: :temporary)
 
     case DynamicSupervisor.start_child(state.workers_supervisor, child_spec) do

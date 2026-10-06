@@ -6,6 +6,10 @@
 
 - Delayed jobs through per-job `schedule_in` (milliseconds) or `schedule_at` (UTC-normalized `DateTime`) options on `perform_async/2` and `build/2`, without consuming an attempt before the scheduled time
 
+### Fixed
+
+- Retention cleanup only removes expired completed, failed or cancelled jobs, preserving active jobs even when overdue; eligibility is rechecked under a transaction lock before deletion
+
 ## [1.0.0]
 
 Stability release: jobs are no longer lost, duplicated or run past their limits, and queues keep up with large backlogs.

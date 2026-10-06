@@ -244,7 +244,7 @@ defmodule Ant.WorkersTest do
   end
 
   describe "list_worker_timestamps/0" do
-    test "returns only the id and the timestamps of every worker" do
+    test "returns only the id, status and timestamps of every worker" do
       workers = create_test_workers(3)
 
       assert {:ok, result} = Workers.list_worker_timestamps()
@@ -259,7 +259,7 @@ defmodule Ant.WorkersTest do
       #
       assert Enum.all?(
                result,
-               &(&1 |> Map.keys() |> Enum.sort() == [:id, :scheduled_at, :updated_at])
+               &(&1 |> Map.keys() |> Enum.sort() == [:id, :scheduled_at, :status, :updated_at])
              )
 
       assert Enum.all?(result, & &1.updated_at)

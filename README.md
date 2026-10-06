@@ -194,7 +194,8 @@ config :mnesia, dir: ~c"/var/lib/my_app/mnesia"
 
 Note that disc persistence needs the node to have a name — start the application with `--sname` or `--name`.
 
-Workers are stored in the database for 2 weeks. You can change this by setting `ttl` option:
+Completed, failed and cancelled jobs are retained for 2 weeks after their last
+update. You can change this by setting the `ttl` option (in milliseconds):
 
 ```elixir
 config :ant,
@@ -202,6 +203,12 @@ config :ant,
     ttl: :timer.hours(24 * 7)
   ]
 ```
+
+Active jobs (`:enqueued`, `:scheduled`, `:retrying`, and `:running`) are never
+removed by retention cleanup, even if they are older than the TTL or overdue.
+This keeps delayed jobs safe while they wait for execution. Expired terminal jobs
+are removed on the next cleanup pass, which runs hourly (or every `ttl`
+milliseconds when the TTL is shorter than an hour).
 
 For storing data about workers indefinitely, set `ttl` to `:infinity`:
 

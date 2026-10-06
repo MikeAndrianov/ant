@@ -35,25 +35,8 @@ defmodule Ant.DatabaseCleaner do
     Process.send_after(self(), :cleanup, interval)
   end
 
-  # Only the timestamps are read: loading whole rows meant pulling every job's
-  # args and error stack traces into memory once an hour.
-  #
   defp run(ttl) do
-    with {:ok, workers} <- Workers.list_worker_timestamps() do
-      workers
-      |> Enum.filter(&expired?(&1, ttl))
-      |> Enum.each(&Workers.delete_worker/1)
-    end
+    cutoff = DateTime.add(DateTime.utc_now(), -ttl, :millisecond)
+    Workers.delete_expired_workers(cutoff)
   end
-
-  defp expired?(worker, ttl) do
-    now = DateTime.utc_now()
-
-    DateTime.diff(now, worker.updated_at, :millisecond) > ttl and not_scheduled?(worker, now)
-  end
-
-  defp not_scheduled?(%{scheduled_at: nil}, _date_time), do: true
-
-  defp not_scheduled?(%{scheduled_at: scheduled_at}, date_time),
-    do: DateTime.compare(scheduled_at, date_time) != :gt
 end

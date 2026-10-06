@@ -10,6 +10,8 @@ defmodule Ant.Workers do
   alias Ant.Repo
   alias Ant.WorkerUniquenessChecker
 
+  @terminal_statuses [:completed, :failed, :cancelled]
+
   @spec create_worker(Ant.Worker.t()) :: {:ok, Ant.Worker.t()} | {:error, any()}
   def create_worker(worker) do
     params = %{
@@ -95,7 +97,43 @@ defmodule Ant.Workers do
   #
   @spec list_worker_timestamps() :: {:ok, [map()]}
   def list_worker_timestamps,
-    do: {:ok, Repo.select_columns(:ant_workers, %{}, [:id, :updated_at, :scheduled_at])}
+    do: {:ok, Repo.select_columns(:ant_workers, %{}, [:id, :status, :updated_at, :scheduled_at])}
+
+  @doc false
+  @spec delete_expired_workers(DateTime.t()) :: :ok | {:error, any()}
+  def delete_expired_workers(cutoff) do
+    {:ok, workers} = list_worker_timestamps()
+
+    workers
+    |> Enum.filter(&expired?(&1, cutoff))
+    |> Enum.reduce_while(:ok, fn worker, :ok ->
+      case delete_expired_worker(worker.id, cutoff) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  # The scan above is only a list of candidates. Lock and reread before deleting:
+  # a job may have been rescheduled or updated since the scan, or already deleted.
+  #
+  defp delete_expired_worker(id, cutoff) do
+    Repo.transaction(fn ->
+      :ok = Repo.lock(:ant_workers, id)
+      id |> get_worker() |> delete_if_expired(cutoff)
+    end)
+  end
+
+  defp delete_if_expired({:ok, worker}, cutoff) do
+    if expired?(worker, cutoff), do: delete_worker(worker), else: :ok
+  end
+
+  defp delete_if_expired({:error, :not_found}, _cutoff), do: :ok
+  defp delete_if_expired(error, _cutoff), do: error
+
+  defp expired?(worker, cutoff) do
+    worker.status in @terminal_statuses and DateTime.compare(worker.updated_at, cutoff) == :lt
+  end
 
   @spec get_worker(integer()) :: {:ok, Ant.Worker.t()} | {:error, any()}
   def get_worker(id), do: Repo.get(:ant_workers, id)

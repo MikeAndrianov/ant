@@ -7,7 +7,7 @@ defmodule Ant.MixProject do
       package: package(),
       name: "Ant",
       description: "Background job processing library for Elixir focused on simplicity",
-      version: "1.0.0",
+      version: "1.1.0",
       elixir: "~> 1.16",
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),

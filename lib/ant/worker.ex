@@ -123,7 +123,8 @@ defmodule Ant.Worker do
 
   @doc false
   @spec new(module(), atom() | String.t(), map(), keyword(), keyword()) ::
-          {:ok, t()} | {:error, {:invalid_schedule, String.t()}}
+          {:ok, %__MODULE__{id: nil, updated_at: nil}}
+          | {:error, {:invalid_schedule, String.t()}}
   def new(worker_module, queue_name, args, opts, defaults) do
     opts =
       Enum.reduce(defaults, opts, fn {key, value}, opts -> Keyword.put_new(opts, key, value) end)

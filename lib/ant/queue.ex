@@ -12,6 +12,10 @@ defmodule Ant.Queue do
   any reason, the queue frees its slot and looks for more work right away. A
   worker that terminates without recording its own result is retried or failed
   by the queue.
+
+  Scheduled workers are the exception: finding the due ones means reading every
+  one of them, so they are looked up once per `check_interval`, however busy the
+  queue is - unless the previous lookup took every free slot.
   """
 
   use GenServer
@@ -65,6 +69,14 @@ defmodule Ant.Queue do
       check_interval: check_interval,
       concurrency: concurrency,
       queue_name: queue_name,
+      # Monotonic time (in milliseconds) of the last lookup of scheduled workers,
+      # or nil when the next check has to look them up.
+      #
+      scheduled_lookup_at: nil,
+      # Whether the next check should come right away, because a slot was left
+      # free during this one.
+      #
+      check_again: false,
       timer_ref: nil
     }
 
@@ -147,7 +159,7 @@ defmodule Ant.Queue do
         state
 
       slots ->
-        {:ok, workers} = list_workers_to_process(state.queue_name, limit: slots)
+        {:ok, workers, state} = list_workers_to_process(state, slots)
 
         Enum.reduce(workers, state, &run_worker/2)
     end
@@ -170,24 +182,58 @@ defmodule Ant.Queue do
   # Each subsequent type gets the limit that is left over from the previous ones;
   # once the limit is exhausted, the remaining types are skipped entirely.
   #
-  defp list_workers_to_process(queue_name, opts) do
-    limit = Keyword.get(opts, :limit)
+  defp list_workers_to_process(state, limit) do
+    queue_name = state.queue_name
 
-    with {:ok, scheduled_workers} <-
-           Workers.list_scheduled_workers(
-             %{queue_name: queue_name},
-             DateTime.utc_now(),
-             limit: limit
-           ),
+    with {:ok, scheduled_workers, state} <- fetch_scheduled_workers(state, limit),
          retrying_limit = remaining_limit(limit, scheduled_workers),
          {:ok, retrying_workers} <- fetch_retrying_workers(queue_name, retrying_limit),
          enqueued_limit = remaining_limit(retrying_limit, retrying_workers),
          {:ok, enqueued_workers} <- fetch_enqueued_workers(queue_name, enqueued_limit) do
-      {:ok, scheduled_workers ++ retrying_workers ++ enqueued_workers}
+      {:ok, scheduled_workers ++ retrying_workers ++ enqueued_workers, state}
     end
   end
 
   defp remaining_limit(limit, workers), do: max(limit - length(workers), 0)
+
+  # Finding the scheduled workers that are due means reading every scheduled
+  # worker, and delayed jobs pile up - think of a reminder for every order of
+  # the past few days. A busy queue checks for work every time one of its jobs
+  # finishes, and reading all of them on each of those checks cut its throughput
+  # by more than ten times with 10,000 delayed jobs. So they are looked up once
+  # per check interval, as often as an idle queue checks - unless the last
+  # lookup filled every free slot, and more of them may be due.
+  #
+  defp fetch_scheduled_workers(state, limit) do
+    now = monotonic_time()
+
+    if scheduled_lookup_due?(state, now) do
+      lookup_scheduled_workers(state, limit, now)
+    else
+      {:ok, [], state}
+    end
+  end
+
+  defp scheduled_lookup_due?(%{scheduled_lookup_at: nil}, _now), do: true
+
+  defp scheduled_lookup_due?(state, now),
+    do: now - state.scheduled_lookup_at >= state.check_interval
+
+  # A lookup that filled every free slot may have left due workers behind, so
+  # the next check looks again rather than waiting for the interval.
+  #
+  defp lookup_scheduled_workers(state, limit, now) do
+    with {:ok, workers} <-
+           Workers.list_scheduled_workers(
+             %{queue_name: state.queue_name},
+             DateTime.utc_now(),
+             limit: limit
+           ) do
+      lookup_at = if length(workers) < limit, do: now
+
+      {:ok, workers, %{state | scheduled_lookup_at: lookup_at}}
+    end
+  end
 
   defp fetch_retrying_workers(_queue_name, 0), do: {:ok, []}
 
@@ -201,7 +247,10 @@ defmodule Ant.Queue do
     Workers.list_enqueued_workers(%{queue_name: queue_name}, DateTime.utc_now(), limit: limit)
   end
 
-  defp schedule_check(state), do: schedule_check(state, state.check_interval)
+  defp schedule_check(%{check_again: true} = state),
+    do: schedule_check(%{state | check_again: false}, 0)
+
+  defp schedule_check(state), do: schedule_check(state, next_check_in(state))
 
   defp schedule_check(state, check_interval) do
     # Cancels already scheduled check.
@@ -231,9 +280,45 @@ defmodule Ant.Queue do
     :ok
   end
 
-  defp run_worker(worker, state) do
-    {:ok, running_worker} = Workers.update_worker(worker.id, %{status: :running})
+  # Checks triggered by finished jobs skip the scheduled workers, and they also
+  # push back the next periodic check. So that check is set for when the next
+  # lookup of scheduled workers is due, which keeps their wait within the check
+  # interval.
+  #
+  defp next_check_in(%{scheduled_lookup_at: nil} = state), do: state.check_interval
 
+  defp next_check_in(state) do
+    case state.scheduled_lookup_at + state.check_interval - monotonic_time() do
+      until_lookup when until_lookup > 0 -> until_lookup
+      _overdue -> state.check_interval
+    end
+  end
+
+  defp monotonic_time, do: System.monotonic_time(:millisecond)
+
+  defp run_worker(worker, state) do
+    case Workers.mark_running(worker) do
+      {:ok, running_worker} ->
+        start_worker(worker, running_worker, state)
+
+      # Changed (e.g. cancelled) or deleted since it was listed, so it must not
+      # run. Its share of the limit has gone unused, though: the next check
+      # comes right away to fill the slot, rather than a check interval later.
+      #
+      {:error, reason} when reason in [:changed, :not_found] ->
+        %{state | check_again: true}
+
+      {:error, reason} ->
+        Logger.error(
+          "#{inspect(worker.worker_module)} (worker ##{worker.id}) could not be marked as " <>
+            "running: #{inspect(reason)}. It is left in the #{worker.status} status."
+        )
+
+        keep_if_recovered(worker, state)
+    end
+  end
+
+  defp start_worker(worker, running_worker, state) do
     child_spec = Supervisor.child_spec({Ant.Worker, running_worker}, restart: :temporary)
 
     case DynamicSupervisor.start_child(state.workers_supervisor, child_spec) do
@@ -253,16 +338,27 @@ defmodule Ant.Queue do
             "#{inspect(error)}. The worker is returned to the #{worker.status} status."
         )
 
-        {:ok, _worker} = Workers.update_worker(worker.id, %{status: worker.status})
-
-        # A worker recovered as stuck is not in a status the periodic check looks at,
-        # so it has to be kept in the state to be retried on the next check.
-        #
-        if worker.status == :running,
-          do: %{state | stuck_workers: [worker | state.stuck_workers]},
-          else: state
+        return_worker(worker, state)
     end
   end
+
+  # A worker that could not be started goes back to the status it was listed
+  # with, to be picked up again - unless it has been deleted in the meantime.
+  #
+  defp return_worker(worker, state) do
+    case Workers.update_worker(worker.id, %{status: worker.status}) do
+      {:ok, _worker} -> keep_if_recovered(worker, state)
+      {:error, :not_found} -> state
+    end
+  end
+
+  # A worker recovered as stuck is not in a status the periodic check looks at,
+  # so it has to be kept in the state to be retried on the next check.
+  #
+  defp keep_if_recovered(%{status: :running} = worker, state),
+    do: %{state | stuck_workers: [worker | state.stuck_workers]}
+
+  defp keep_if_recovered(_worker, state), do: state
 
   # A worker process that terminates abnormally never gets to record the failure
   # itself, which would leave the job in the :running status until the next

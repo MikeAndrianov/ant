@@ -38,6 +38,40 @@ Create a job to be processed asynchronously:
 
 Note that the function to create a job is named `perform_async` and not `perform`. It returns a tuple with `:ok` and a worker struct.
 
+### Delayed jobs
+
+Schedule a job without running it or recording a failed attempt first:
+
+```elixir
+{:ok, worker} = SupplierReminderWorker.perform_async(
+  %{order_id: order.id},
+  schedule_in: :timer.hours(24 * 5)
+)
+
+# Or provide an absolute time:
+SupplierReminderWorker.perform_async(
+  %{order_id: order.id},
+  schedule_at: ~U[2026-10-11 09:00:00Z]
+)
+```
+
+`schedule_in` is a non-negative integer in **milliseconds**, consistent with Ant's
+timeout and retry delay options. `schedule_at` accepts a timezone-aware `DateTime`
+and normalizes it to UTC. Use only one of these options per job; both are also
+accepted by `build/2`. They are per-job options, not `use Ant.Worker` defaults.
+
+Future jobs have status `:scheduled`, zero attempts and no errors until they run.
+A zero delay or a timestamp in the past makes the job immediately eligible.
+Without either option, `perform_async/2` behaves as before. Invalid scheduling
+options return `{:error, {:invalid_schedule, reason}}`; `build/2` raises
+`ArgumentError` instead.
+
+The timestamp is the earliest the job may run. Queue polling (every five seconds
+by default) and available capacity can delay execution. Once the job runs, its
+normal timeout and retry policy apply.
+
+A delayed job that is no longer needed can be [cancelled](#cancelling-jobs).
+
 ## Configuration
 
 You can configure the library to make it more suitable for your use case.
@@ -153,7 +187,8 @@ config :mnesia, dir: ~c"/var/lib/my_app/mnesia"
 
 Note that disc persistence needs the node to have a name — start the application with `--sname` or `--name`.
 
-Workers are stored in the database for 2 weeks. You can change this by setting `ttl` option:
+Completed, failed and cancelled jobs are retained for 2 weeks after their last
+update. You can change this by setting the `ttl` option (in milliseconds):
 
 ```elixir
 config :ant,
@@ -162,7 +197,15 @@ config :ant,
   ]
 ```
 
-For storing data about workers indefinitely, set `ttl` to `:infinity`:
+Active jobs (`:enqueued`, `:scheduled`, `:retrying`, and `:running`) are never
+removed by retention cleanup, even if they are older than the TTL or overdue.
+This keeps delayed jobs safe while they wait for execution. Expired terminal jobs
+are removed on the next cleanup pass, which runs hourly (or every `ttl`
+milliseconds when the TTL is shorter than an hour).
+
+The TTL must be a positive number of milliseconds, or `:infinity`; anything
+else fails when Ant starts. For storing data about workers indefinitely, set `ttl`
+to `:infinity`:
 
 ```elixir
 config :ant,
@@ -270,8 +313,22 @@ Mnesia has no authentication of its own: any node that can reach the Erlang dist
 
 ## Operations with Workers
 
-1. `Ant.Workers.list_workers()` - returns a list of all workers
-It supports filtering by one or multiple attributes:
+Jobs are stored as `%Ant.Worker{}` structs. `Ant.Workers` has functions to look
+them up and manage them once they have been created. A job is in one of these
+statuses:
+
+- `:enqueued` - waiting for its queue to run it
+- `:scheduled` - delayed, waiting for its `scheduled_at` time
+- `:running` - being run right now
+- `:retrying` - failed an attempt, waiting to be retried at `scheduled_at`
+- `:completed` - finished successfully
+- `:failed` - failed its last attempt
+- `:cancelled` - cancelled before it ran
+
+### Listing jobs
+
+`Ant.Workers.list_workers/2` returns the jobs that match all the given
+attributes, or every job when called without any:
 
 ```elixir
 iex(1)> Ant.Workers.list_workers(%{
@@ -279,56 +336,111 @@ iex(1)> Ant.Workers.list_workers(%{
 ...(1)>   status: :failed,
 ...(1)>   args: %{email: "jane.smith734@@yahoo.com"}
 ...(1)> })
-  {:ok,
-   [
-      %Ant.Worker{
-        id: 1150403,
-        worker_module: AntSandbox.SendPromotionWorker,
-        queue_name: :default,
-        args: %{email: "jane.smith734@@yahoo.com"},
-        status: :failed,
-        attempts: 3,
-        scheduled_at: nil,
-        updated_at: ~U[2025-01-11 17:31:29.615924Z],
-        errors: [
-        %{
-            error: "Expected :ok or {:ok, _result}, but got {:error, \"Invalid email\"}",
-            attempt: 3,
-            stack_trace: nil,
-            attempted_at: ~U[2025-01-11 17:31:29.615792Z]
-        },
-        %{
-            error: "Expected :ok or {:ok, _result}, but got {:error, \"Invalid email\"}",
-            attempt: 2,
-            stack_trace: nil,
-            attempted_at: ~U[2025-01-11 17:30:56.964108Z]
-        },
-        %{
-            error: "Expected :ok or {:ok, _result}, but got {:error, \"Invalid email\"}",
-            attempt: 1,
-            stack_trace: nil,
-            attempted_at: ~U[2025-01-11 17:30:32.909500Z]
-        }
-        ],
-        opts: [max_attempts: 3]
-      }
-    ]}
+{:ok,
+ [
+   %Ant.Worker{
+     id: 1150403,
+     worker_module: AntSandbox.SendPromotionWorker,
+     queue_name: :default,
+     args: %{email: "jane.smith734@@yahoo.com"},
+     status: :failed,
+     attempts: 3,
+     scheduled_at: nil,
+     updated_at: ~U[2025-01-11 17:31:29.615924Z],
+     errors: [
+       %{
+         error: "Expected :ok or {:ok, _result}, but got {:error, \"Invalid email\"}",
+         attempt: 3,
+         stack_trace: nil,
+         attempted_at: ~U[2025-01-11 17:31:29.615792Z]
+       },
+       %{
+         error: "Expected :ok or {:ok, _result}, but got {:error, \"Invalid email\"}",
+         attempt: 2,
+         stack_trace: nil,
+         attempted_at: ~U[2025-01-11 17:30:56.964108Z]
+       },
+       %{
+         error: "Expected :ok or {:ok, _result}, but got {:error, \"Invalid email\"}",
+         attempt: 1,
+         stack_trace: nil,
+         attempted_at: ~U[2025-01-11 17:30:32.909500Z]
+       }
+     ],
+     opts: [max_attempts: 3]
+   }
+ ]}
 ```
 
-Supported options:
-- `limit`: returns up to the specified number of workers.
-  ```elixir
-  iex(1)> Ant.Workers.list_workers(
-  ...(1)>   %{status: :failed},
-  ...(1)>   limit: 10
-  ...(1)> )
-    {:ok,
-      [
-        %Ant.Worker{...},
-        ...
-      ]
-    }
-  ```
+`args` matches jobs whose arguments include the given keys and values, so
+`%{args: %{email: email}}` also finds jobs that have more arguments than
+`email`. Other attributes have to be equal, and an attribute given as `nil`
+matches any job. The order of the returned jobs isn't guaranteed.
 
-2. `Ant.Workers.get_worker(id)` - returns a worker by id
-3. `Ant.Workers.delete_worker(worker)` - deletes a worker. It's not recommended to use this function directly.
+Pass `limit` to return up to that many jobs:
+
+```elixir
+Ant.Workers.list_workers(%{status: :failed}, limit: 10)
+
+# Without filters:
+Ant.Workers.list_workers(limit: 10)
+```
+
+For example, to see the delayed jobs that are still waiting to run:
+
+```elixir
+{:ok, workers} = Ant.Workers.list_workers(%{status: :scheduled})
+```
+
+### Getting a job
+
+`Ant.Workers.get_worker/1` returns a job by its id, for example to check how it
+went:
+
+```elixir
+{:ok, worker} = MyWorker.perform_async(%{first: "first", second: 2})
+
+# Later:
+{:ok, %Ant.Worker{status: status, errors: errors}} = Ant.Workers.get_worker(worker.id)
+```
+
+It returns `{:error, :not_found}` when there is no job with that id, for example
+once a finished job has been removed by [retention cleanup](#database).
+
+### Cancelling jobs
+
+A job that hasn't started running yet can be cancelled, for example once the
+supplier has responded and the reminder is no longer needed. Pass the job, or
+its id, to `Ant.Workers.cancel_worker/1`:
+
+```elixir
+Ant.Workers.cancel_worker(worker)
+# => {:ok, %Ant.Worker{status: :cancelled, ...}}
+
+# Or by id, for example one stored with the order:
+Ant.Workers.cancel_worker(order.reminder_job_id)
+```
+
+Enqueued, scheduled and retrying jobs can be cancelled; their queue will not run
+them. Cancelling an already cancelled job returns it unchanged. A running job
+isn't stopped part of the way through: for it, as for completed and failed jobs,
+`{:error, {:not_cancellable, status}}` is returned and the job is left as it is.
+Cancelled jobs are retained like completed and failed ones.
+
+A cancellation can come just too late, when the job has already started. So a
+job that may no longer be needed by the time it runs should still check for
+that in `perform/1`.
+
+### Deleting jobs
+
+`Ant.Workers.delete_worker/1` removes a job, along with its errors, for good:
+
+```elixir
+:ok = Ant.Workers.delete_worker(worker)
+```
+
+It's not recommended to use it directly. Deleting a running job doesn't stop
+it, and the job's result is lost. To keep a job from running,
+[cancel](#cancelling-jobs) it instead; completed, failed and cancelled jobs are
+removed by [retention cleanup](#database). Deleting a job that no longer exists
+returns `{:error, :not_found}`.

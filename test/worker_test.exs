@@ -64,7 +64,7 @@ defmodule Ant.WorkerTest do
   defmodule ExceptionWorkerHandlesExceptionWithoutMessage do
     use Ant.Worker, max_attempts: 3
 
-    def perform(_worker), do: whoops(%{status: :error})
+    def perform(%{args: args}), do: whoops(args)
 
     def calculate_delay(_worker), do: 0
 
@@ -119,6 +119,84 @@ defmodule Ant.WorkerTest do
       assert worker.attempts == 0
       assert worker.errors == []
       assert worker.opts == [unique: [], timeout: :infinity, max_attempts: 1]
+    end
+  end
+
+  describe "delayed jobs" do
+    test "persists a delay without consuming an attempt" do
+      before = DateTime.utc_now()
+      delay = :timer.hours(24 * 5)
+
+      assert {:ok, worker} = MyTestWorker.perform_async(%{order_id: 1}, schedule_in: delay)
+      after_creation = DateTime.utc_now()
+
+      assert worker.status == :scheduled
+      assert worker.attempts == 0
+      assert worker.errors == []
+      assert DateTime.diff(worker.scheduled_at, before, :millisecond) >= delay
+      assert DateTime.diff(worker.scheduled_at, after_creation, :millisecond) <= delay
+      assert {:ok, ^worker} = Ant.Workers.get_worker(worker.id)
+    end
+
+    test "build and create preserve an absolute scheduled time" do
+      at = DateTime.add(DateTime.utc_now(), 86_400, :second)
+      worker = MyTestWorker.build(%{}, schedule_at: at)
+
+      assert worker.status == :scheduled
+      assert {:ok, persisted} = Ant.Workers.create_worker(worker)
+      assert persisted.status == :scheduled
+      assert persisted.scheduled_at == at
+    end
+
+    test "normalizes an offset datetime to UTC" do
+      at = %{
+        ~U[2099-01-01 10:00:00Z]
+        | time_zone: "Etc/GMT-2",
+          zone_abbr: "+02",
+          utc_offset: 7200
+      }
+
+      assert {:ok, worker} = MyTestWorker.perform_async(%{}, schedule_at: at)
+      assert worker.scheduled_at == ~U[2099-01-01 08:00:00Z]
+    end
+
+    test "zero delay and past timestamps are immediately eligible" do
+      assert {:ok, zero} = MyTestWorker.perform_async(%{}, schedule_in: 0)
+      assert {:ok, past} = MyTestWorker.perform_async(%{}, schedule_at: ~U[2000-01-01 00:00:00Z])
+      assert zero.status == :enqueued
+      assert past.status == :enqueued
+    end
+
+    test "uses the exact due boundary without consuming the query limit early" do
+      now = ~U[2030-01-01 00:00:00.000000Z]
+      assert {:ok, :enqueued, ^now} = Worker.schedule([schedule_at: now], now)
+      assert {:ok, :enqueued, ^now} = Worker.schedule([schedule_in: 0], now)
+      assert {:ok, :scheduled, at} = Worker.schedule([schedule_in: 1], now)
+      assert at == DateTime.add(now, 1, :millisecond)
+
+      {:ok, worker} = MyTestWorker.perform_async(%{}, schedule_at: at)
+      assert {:ok, []} = Ant.Workers.list_scheduled_workers(%{}, now, limit: 1)
+      assert {:ok, [^worker]} = Ant.Workers.list_scheduled_workers(%{}, at, limit: 1)
+    end
+
+    for opts <- [
+          [schedule_in: -1],
+          [schedule_in: 1.5],
+          [schedule_in: "5000"],
+          [schedule_in: nil],
+          [schedule_in: 10 ** 30],
+          [schedule_at: nil],
+          [schedule_at: "2030-01-01"],
+          [schedule_at: ~N[2030-01-01 00:00:00]],
+          [schedule_in: 0, schedule_at: ~U[2030-01-01 00:00:00Z]]
+        ] do
+      test "rejects invalid options #{inspect(opts)} without inserting a job" do
+        opts = unquote(Macro.escape(opts))
+        assert {:error, {:invalid_schedule, reason}} = MyTestWorker.perform_async(%{}, opts)
+        assert is_binary(reason)
+        assert_raise ArgumentError, reason, fn -> MyTestWorker.build(%{}, opts) end
+        assert {:ok, []} = Ant.Workers.list_workers()
+      end
     end
   end
 

@@ -36,6 +36,49 @@ defmodule Ant.RepoTest do
     end
   end
 
+  describe "update_where/3" do
+    test "updates the record when the function returns changes" do
+      [record] = create_test_records(1)
+
+      assert {:ok, updated} =
+               Repo.update_where(:ant_workers, record.id, fn %Ant.Worker{status: :enqueued} ->
+                 {:update, %{status: :running}}
+               end)
+
+      assert updated.status == :running
+      assert {:ok, ^updated} = Repo.get(:ant_workers, record.id)
+    end
+
+    test "returns the record as it is when it is left unchanged" do
+      [record] = create_test_records(1)
+
+      assert Repo.update_where(:ant_workers, record.id, fn _record -> :unchanged end) ==
+               {:ok, record}
+
+      assert {:ok, ^record} = Repo.get(:ant_workers, record.id)
+    end
+
+    test "deletes the record" do
+      [record] = create_test_records(1)
+
+      assert :ok = Repo.update_where(:ant_workers, record.id, fn _record -> :delete end)
+      assert {:error, :not_found} = Repo.get(:ant_workers, record.id)
+    end
+
+    test "returns the function's error and leaves the record as it is" do
+      [record] = create_test_records(1)
+
+      assert {:error, :refused} =
+               Repo.update_where(:ant_workers, record.id, fn _ -> {:error, :refused} end)
+
+      assert {:ok, ^record} = Repo.get(:ant_workers, record.id)
+    end
+
+    test "returns error for non-existent record" do
+      assert {:error, :not_found} = Repo.update_where(:ant_workers, 999, fn _ -> :delete end)
+    end
+  end
+
   describe "delete/2" do
     test "deletes an existing record" do
       [record] = create_test_records(1)

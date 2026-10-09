@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Delayed jobs through per-job `schedule_in` (milliseconds) or `schedule_at` (UTC-normalized `DateTime`) options on `perform_async/2` and `build/2`, without consuming an attempt before the scheduled time
+- `Ant.Workers.cancel_worker/1`, to cancel an enqueued, scheduled or retrying job before it runs
+
+### Changed
+
+- Queues look for due scheduled jobs once per `check_interval`, rather than every time one of their jobs finishes: finding them means reading every scheduled job, which slowed busy queues down by more than ten times with 10,000 delayed jobs
+- A `ttl` that is not a positive number of milliseconds or `:infinity` fails when Ant starts, instead of breaking every cleanup; a float is rounded
+
+### Fixed
+
+- Retention cleanup only removes expired completed, failed or cancelled jobs, preserving active jobs even when overdue; eligibility is rechecked under a transaction lock before deletion, and jobs that can't be removed are logged and tried again on the next pass
+- Jobs changed or deleted between a queue listing and starting them: a cancelled job could still run, a job retried in the meantime could start again ahead of its retry delay, and a deleted one crashed the queue along with every job it was running
+
 ## [1.0.0]
 
 Stability release: jobs are no longer lost, duplicated or run past their limits, and queues keep up with large backlogs.

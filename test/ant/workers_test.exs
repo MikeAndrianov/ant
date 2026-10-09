@@ -281,6 +281,16 @@ defmodule Ant.WorkersTest do
       assert created_worker.status == :enqueued
     end
 
+    test "scheduled jobs participate in active job uniqueness" do
+      args = %{email: "scheduled@example.com"}
+      assert {:ok, worker} = UniqueTestWorker.perform_async(args, schedule_in: 86_400_000)
+      assert worker.status == :scheduled
+      assert UniqueTestWorker.perform_async(args) == {:error, :already_exists}
+
+      assert UniqueTestWorker.perform_async(args, schedule_in: 172_800_000) ==
+               {:error, :already_exists}
+    end
+
     test "returns error when uniqueness check fails" do
       worker = TestWorker.build(%{email: "test@example.com"})
 
@@ -344,6 +354,103 @@ defmodule Ant.WorkersTest do
       end)
 
       assert {:ok, _created_worker} = Workers.create_worker(worker)
+    end
+  end
+
+  describe "mark_running/1" do
+    test "marks a worker that is as it was listed as running" do
+      [worker] = create_test_workers(1, status: :scheduled)
+
+      assert {:ok, %{status: :running}} = Workers.mark_running(worker)
+    end
+
+    test "leaves a worker whose status changed since it was listed" do
+      [worker] = create_test_workers(1, status: :scheduled)
+      {:ok, cancelled} = Workers.cancel_worker(worker)
+
+      assert Workers.mark_running(worker) == {:error, :changed}
+      assert {:ok, ^cancelled} = Workers.get_worker(worker.id)
+    end
+
+    test "leaves a worker whose due time changed since it was listed" do
+      # A retrying worker that ran and failed again since it was listed is back
+      # in the same status, but with a later time.
+      #
+      [worker] = create_test_workers(1, status: :retrying)
+      later = DateTime.add(DateTime.utc_now(), 60, :second)
+      {:ok, retried} = Workers.update_worker(worker.id, %{scheduled_at: later})
+
+      assert Workers.mark_running(worker) == {:error, :changed}
+      assert {:ok, ^retried} = Workers.get_worker(worker.id)
+    end
+
+    test "returns an error for a worker deleted since it was listed" do
+      [worker] = create_test_workers(1)
+      :ok = Workers.delete_worker(worker)
+
+      assert Workers.mark_running(worker) == {:error, :not_found}
+    end
+  end
+
+  describe "cancel_worker/1" do
+    for status <- [:enqueued, :scheduled, :retrying] do
+      test "cancels a #{status} job" do
+        [worker] = create_test_workers(1, status: unquote(status))
+
+        assert {:ok, cancelled} = Workers.cancel_worker(worker)
+        assert cancelled.status == :cancelled
+        assert {:ok, ^cancelled} = Workers.get_worker(worker.id)
+      end
+    end
+
+    test "takes the job or its id" do
+      [first, second] = create_test_workers(2, status: :scheduled)
+
+      assert {:ok, %{status: :cancelled}} = Workers.cancel_worker(first)
+      assert {:ok, %{status: :cancelled}} = Workers.cancel_worker(second.id)
+    end
+
+    test "keeps the attempts, errors and scheduled time of the job" do
+      scheduled_at = DateTime.add(DateTime.utc_now(), 60, :second)
+      [worker] = create_test_workers(1, status: :retrying)
+
+      {:ok, worker} =
+        Workers.update_worker(worker.id, %{
+          attempts: 1,
+          errors: [%{attempt: 1, error: "boom"}],
+          scheduled_at: scheduled_at
+        })
+
+      assert {:ok, cancelled} = Workers.cancel_worker(worker)
+      assert %{attempts: 1, errors: [%{attempt: 1}], scheduled_at: ^scheduled_at} = cancelled
+    end
+
+    test "returns an already cancelled job unchanged" do
+      [worker] = create_test_workers(1, status: :cancelled)
+
+      assert Workers.cancel_worker(worker) == {:ok, worker}
+    end
+
+    for status <- [:running, :completed, :failed] do
+      test "leaves a #{status} job as it is" do
+        [worker] = create_test_workers(1, status: unquote(status))
+
+        assert Workers.cancel_worker(worker) == {:error, {:not_cancellable, unquote(status)}}
+        assert {:ok, ^worker} = Workers.get_worker(worker.id)
+      end
+    end
+
+    test "returns an error for a job that does not exist" do
+      assert Workers.cancel_worker(123_456) == {:error, :not_found}
+    end
+
+    test "a cancelled job no longer prevents a unique job from being created" do
+      args = %{email: "cancelled@example.com"}
+      {:ok, worker} = UniqueTestWorker.perform_async(args, schedule_in: 86_400_000)
+      assert UniqueTestWorker.perform_async(args) == {:error, :already_exists}
+
+      assert {:ok, _cancelled} = Workers.cancel_worker(worker)
+      assert {:ok, %{status: :enqueued}} = UniqueTestWorker.perform_async(args)
     end
   end
 

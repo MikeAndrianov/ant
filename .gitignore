@@ -29,3 +29,6 @@ ant-*.tar
 # Dialyzer PLTs, rebuilt from mix.lock.
 /priv/plts/*.plt
 /priv/plts/*.plt.hash
+
+# Local Claude Code settings and worktrees.
+/.claude/

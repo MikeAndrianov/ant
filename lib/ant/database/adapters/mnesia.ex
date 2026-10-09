@@ -100,6 +100,34 @@ defmodule Ant.Database.Adapters.Mnesia do
     transaction(fn -> update_row(db_table, id, params) end)
   end
 
+  # What `UPDATE ... WHERE` is in SQL. Mnesia has no conditional write - a write
+  # replaces the row with that key, whatever it holds - so the row is read under
+  # a write lock, and `fun` decides, in the same transaction, what happens to it.
+  # Nothing can change the row between the decision and the write:
+  #
+  #   * `{:update, params}` writes the changes and returns `{:ok, record}`;
+  #   * `:unchanged` leaves the row as it is and returns `{:ok, record}`;
+  #   * `:delete` removes the row and returns `:ok`;
+  #   * `{:error, reason}` leaves the row as it is and is returned.
+  #
+  def update_where(db_table, id, fun) do
+    transaction(fn ->
+      case :mnesia.read(db_table, id, :write) do
+        [] -> {:error, :not_found}
+        [row] -> apply_change(db_table, id, to_map(row, get_table_columns(db_table)), fun)
+      end
+    end)
+  end
+
+  defp apply_change(db_table, id, record, fun) do
+    case fun.(record) do
+      {:update, params} -> write_row(db_table, Map.merge(record, params))
+      :unchanged -> {:ok, record}
+      :delete -> :mnesia.delete({db_table, id})
+      {:error, _reason} = error -> error
+    end
+  end
+
   # An aborted transaction is reported the same way as any other failure, so
   # callers never have to know that Mnesia is behind the Repo.
   #

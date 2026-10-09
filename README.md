@@ -70,37 +70,7 @@ The timestamp is the earliest the job may run. Queue polling (every five seconds
 by default) and available capacity can delay execution. Once the job runs, its
 normal timeout and retry policy apply.
 
-For reminders, reload the order in `perform/1`: return `:ok` if the supplier has
-already responded, otherwise send the notification. Make the notification
-idempotent where possible, since a crash can cause a job to execute again.
-
-To keep scheduled jobs across VM restarts, configure disk-backed Mnesia
-(`:disc_copies` or `:disc_only_copies`) as described below. The default
-`:ram_copies` storage is in memory. Persisted overdue jobs are picked up when Ant
-resumes; there is no need to keep a process or timer alive for each delayed job.
-
-### Cancelling jobs
-
-A job that hasn't started running yet can be cancelled, for example once the
-supplier has responded and the reminder is no longer needed. Pass the job, or
-its id, to `Ant.Workers.cancel_worker/1`:
-
-```elixir
-Ant.Workers.cancel_worker(worker)
-# => {:ok, %Ant.Worker{status: :cancelled, ...}}
-
-# Or by id, for example one stored with the order:
-Ant.Workers.cancel_worker(order.reminder_job_id)
-```
-
-Enqueued, scheduled and retrying jobs can be cancelled; their queue will not run
-them. Cancelling an already cancelled job returns it unchanged. A running job
-isn't stopped part of the way through: for it, as for completed and failed jobs,
-`{:error, {:not_cancellable, status}}` is returned and the job is left as it is.
-Cancelled jobs are retained like completed and failed ones.
-
-A cancellation can come just too late, when the job has started, which is why a
-reminder should still check the order in `perform/1` as described above.
+A delayed job that is no longer needed can be [cancelled](#cancelling-jobs).
 
 ## Configuration
 
@@ -343,8 +313,22 @@ Mnesia has no authentication of its own: any node that can reach the Erlang dist
 
 ## Operations with Workers
 
-1. `Ant.Workers.list_workers()` - returns a list of all workers
-It supports filtering by one or multiple attributes:
+Jobs are stored as `%Ant.Worker{}` structs. `Ant.Workers` has functions to look
+them up and manage them once they have been created. A job is in one of these
+statuses:
+
+- `:enqueued` - waiting for its queue to run it
+- `:scheduled` - delayed, waiting for its `scheduled_at` time
+- `:running` - being run right now
+- `:retrying` - failed an attempt, waiting to be retried at `scheduled_at`
+- `:completed` - finished successfully
+- `:failed` - failed its last attempt
+- `:cancelled` - cancelled before it ran
+
+### Listing jobs
+
+`Ant.Workers.list_workers/2` returns the jobs that match all the given
+attributes, or every job when called without any:
 
 ```elixir
 iex(1)> Ant.Workers.list_workers(%{
@@ -352,57 +336,111 @@ iex(1)> Ant.Workers.list_workers(%{
 ...(1)>   status: :failed,
 ...(1)>   args: %{email: "jane.smith734@@yahoo.com"}
 ...(1)> })
-  {:ok,
-   [
-      %Ant.Worker{
-        id: 1150403,
-        worker_module: AntSandbox.SendPromotionWorker,
-        queue_name: :default,
-        args: %{email: "jane.smith734@@yahoo.com"},
-        status: :failed,
-        attempts: 3,
-        scheduled_at: nil,
-        updated_at: ~U[2025-01-11 17:31:29.615924Z],
-        errors: [
-        %{
-            error: "Expected :ok or {:ok, _result}, but got {:error, \"Invalid email\"}",
-            attempt: 3,
-            stack_trace: nil,
-            attempted_at: ~U[2025-01-11 17:31:29.615792Z]
-        },
-        %{
-            error: "Expected :ok or {:ok, _result}, but got {:error, \"Invalid email\"}",
-            attempt: 2,
-            stack_trace: nil,
-            attempted_at: ~U[2025-01-11 17:30:56.964108Z]
-        },
-        %{
-            error: "Expected :ok or {:ok, _result}, but got {:error, \"Invalid email\"}",
-            attempt: 1,
-            stack_trace: nil,
-            attempted_at: ~U[2025-01-11 17:30:32.909500Z]
-        }
-        ],
-        opts: [max_attempts: 3]
-      }
-    ]}
+{:ok,
+ [
+   %Ant.Worker{
+     id: 1150403,
+     worker_module: AntSandbox.SendPromotionWorker,
+     queue_name: :default,
+     args: %{email: "jane.smith734@@yahoo.com"},
+     status: :failed,
+     attempts: 3,
+     scheduled_at: nil,
+     updated_at: ~U[2025-01-11 17:31:29.615924Z],
+     errors: [
+       %{
+         error: "Expected :ok or {:ok, _result}, but got {:error, \"Invalid email\"}",
+         attempt: 3,
+         stack_trace: nil,
+         attempted_at: ~U[2025-01-11 17:31:29.615792Z]
+       },
+       %{
+         error: "Expected :ok or {:ok, _result}, but got {:error, \"Invalid email\"}",
+         attempt: 2,
+         stack_trace: nil,
+         attempted_at: ~U[2025-01-11 17:30:56.964108Z]
+       },
+       %{
+         error: "Expected :ok or {:ok, _result}, but got {:error, \"Invalid email\"}",
+         attempt: 1,
+         stack_trace: nil,
+         attempted_at: ~U[2025-01-11 17:30:32.909500Z]
+       }
+     ],
+     opts: [max_attempts: 3]
+   }
+ ]}
 ```
 
-Supported options:
-- `limit`: returns up to the specified number of workers.
-  ```elixir
-  iex(1)> Ant.Workers.list_workers(
-  ...(1)>   %{status: :failed},
-  ...(1)>   limit: 10
-  ...(1)> )
-    {:ok,
-      [
-        %Ant.Worker{...},
-        ...
-      ]
-    }
-  ```
+`args` matches jobs whose arguments include the given keys and values, so
+`%{args: %{email: email}}` also finds jobs that have more arguments than
+`email`. Other attributes have to be equal, and an attribute given as `nil`
+matches any job. The order of the returned jobs isn't guaranteed.
 
-2. `Ant.Workers.get_worker(id)` - returns a worker by id
-3. `Ant.Workers.cancel_worker(worker)` - cancels a job that hasn't started running yet, see [Cancelling jobs](#cancelling-jobs)
-4. `Ant.Workers.delete_worker(worker)` - deletes a worker. It's not recommended to use this function directly.
+Pass `limit` to return up to that many jobs:
+
+```elixir
+Ant.Workers.list_workers(%{status: :failed}, limit: 10)
+
+# Without filters:
+Ant.Workers.list_workers(limit: 10)
+```
+
+For example, to see the delayed jobs that are still waiting to run:
+
+```elixir
+{:ok, workers} = Ant.Workers.list_workers(%{status: :scheduled})
+```
+
+### Getting a job
+
+`Ant.Workers.get_worker/1` returns a job by its id, for example to check how it
+went:
+
+```elixir
+{:ok, worker} = MyWorker.perform_async(%{first: "first", second: 2})
+
+# Later:
+{:ok, %Ant.Worker{status: status, errors: errors}} = Ant.Workers.get_worker(worker.id)
+```
+
+It returns `{:error, :not_found}` when there is no job with that id, for example
+once a finished job has been removed by [retention cleanup](#database).
+
+### Cancelling jobs
+
+A job that hasn't started running yet can be cancelled, for example once the
+supplier has responded and the reminder is no longer needed. Pass the job, or
+its id, to `Ant.Workers.cancel_worker/1`:
+
+```elixir
+Ant.Workers.cancel_worker(worker)
+# => {:ok, %Ant.Worker{status: :cancelled, ...}}
+
+# Or by id, for example one stored with the order:
+Ant.Workers.cancel_worker(order.reminder_job_id)
+```
+
+Enqueued, scheduled and retrying jobs can be cancelled; their queue will not run
+them. Cancelling an already cancelled job returns it unchanged. A running job
+isn't stopped part of the way through: for it, as for completed and failed jobs,
+`{:error, {:not_cancellable, status}}` is returned and the job is left as it is.
+Cancelled jobs are retained like completed and failed ones.
+
+A cancellation can come just too late, when the job has already started. So a
+job that may no longer be needed by the time it runs should still check for
+that in `perform/1`.
+
+### Deleting jobs
+
+`Ant.Workers.delete_worker/1` removes a job, along with its errors, for good:
+
+```elixir
+:ok = Ant.Workers.delete_worker(worker)
+```
+
+It's not recommended to use it directly. Deleting a running job doesn't stop
+it, and the job's result is lost. To keep a job from running,
+[cancel](#cancelling-jobs) it instead; completed, failed and cancelled jobs are
+removed by [retention cleanup](#database). Deleting a job that no longer exists
+returns `{:error, :not_found}`.

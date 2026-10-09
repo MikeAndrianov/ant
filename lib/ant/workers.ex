@@ -75,7 +75,7 @@ defmodule Ant.Workers do
   # job is cancelled before its queue gets to it, or it is already running.
   #
   def cancel_worker(id) do
-    Repo.change(:ant_workers, id, fn
+    Repo.update_where(:ant_workers, id, fn
       %{status: status} when status in @cancellable_statuses -> {:update, %{status: :cancelled}}
       %{status: :cancelled} -> :unchanged
       %{status: status} -> {:error, {:not_cancellable, status}}
@@ -92,7 +92,7 @@ defmodule Ant.Workers do
   @doc false
   @spec mark_running(Ant.Worker.t()) :: {:ok, Ant.Worker.t()} | {:error, any()}
   def mark_running(%{id: id, status: status, scheduled_at: scheduled_at}) do
-    Repo.change(:ant_workers, id, fn
+    Repo.update_where(:ant_workers, id, fn
       %{status: ^status, scheduled_at: ^scheduled_at} -> {:update, %{status: :running}}
       _changed -> {:error, :changed}
     end)
@@ -181,7 +181,11 @@ defmodule Ant.Workers do
   # is removed.
   #
   defp delete_expired_worker(id, cutoff) do
-    case Repo.change(:ant_workers, id, &if(expired?(&1, cutoff), do: :delete, else: :unchanged)) do
+    delete_if_expired = fn worker ->
+      if expired?(worker, cutoff), do: :delete, else: :unchanged
+    end
+
+    case Repo.update_where(:ant_workers, id, delete_if_expired) do
       {:ok, _unchanged_worker} -> :ok
       {:error, :not_found} -> :ok
       result -> result

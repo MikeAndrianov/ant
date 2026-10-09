@@ -36,12 +36,12 @@ defmodule Ant.RepoTest do
     end
   end
 
-  describe "change/3" do
+  describe "update_where/3" do
     test "updates the record when the function returns changes" do
       [record] = create_test_records(1)
 
       assert {:ok, updated} =
-               Repo.change(:ant_workers, record.id, fn %Ant.Worker{status: :enqueued} ->
+               Repo.update_where(:ant_workers, record.id, fn %Ant.Worker{status: :enqueued} ->
                  {:update, %{status: :running}}
                end)
 
@@ -52,14 +52,16 @@ defmodule Ant.RepoTest do
     test "returns the record as it is when it is left unchanged" do
       [record] = create_test_records(1)
 
-      assert Repo.change(:ant_workers, record.id, fn _record -> :unchanged end) == {:ok, record}
+      assert Repo.update_where(:ant_workers, record.id, fn _record -> :unchanged end) ==
+               {:ok, record}
+
       assert {:ok, ^record} = Repo.get(:ant_workers, record.id)
     end
 
     test "deletes the record" do
       [record] = create_test_records(1)
 
-      assert :ok = Repo.change(:ant_workers, record.id, fn _record -> :delete end)
+      assert :ok = Repo.update_where(:ant_workers, record.id, fn _record -> :delete end)
       assert {:error, :not_found} = Repo.get(:ant_workers, record.id)
     end
 
@@ -67,13 +69,13 @@ defmodule Ant.RepoTest do
       [record] = create_test_records(1)
 
       assert {:error, :refused} =
-               Repo.change(:ant_workers, record.id, fn _ -> {:error, :refused} end)
+               Repo.update_where(:ant_workers, record.id, fn _ -> {:error, :refused} end)
 
       assert {:ok, ^record} = Repo.get(:ant_workers, record.id)
     end
 
     test "returns error for non-existent record" do
-      assert {:error, :not_found} = Repo.change(:ant_workers, 999, fn _ -> :delete end)
+      assert {:error, :not_found} = Repo.update_where(:ant_workers, 999, fn _ -> :delete end)
     end
   end
 

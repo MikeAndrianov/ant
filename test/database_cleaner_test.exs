@@ -90,7 +90,9 @@ defmodule Ant.DatabaseCleanerTest do
   test "a worker that can not be removed does not stop cleanup" do
     workers = for status <- [:failed, :completed], do: insert_worker(status, @old)
 
-    expect(Repo, :change, fn _table, _id, _fun -> {:error, {:transaction_aborted, :test}} end)
+    expect(Repo, :update_where, fn _table, _id, _fun ->
+      {:error, {:transaction_aborted, :test}}
+    end)
 
     assert {:error, [{failed_id, {:transaction_aborted, :test}}]} =
              Workers.delete_expired_workers(@cutoff)
@@ -105,7 +107,9 @@ defmodule Ant.DatabaseCleanerTest do
   test "logs the workers it could not remove" do
     insert_worker(:failed, DateTime.add(DateTime.utc_now(), -86_400, :second))
 
-    expect(Repo, :change, fn _table, _id, _fun -> {:error, {:transaction_aborted, :test}} end)
+    expect(Repo, :update_where, fn _table, _id, _fun ->
+      {:error, {:transaction_aborted, :test}}
+    end)
 
     log =
       capture_log(fn ->

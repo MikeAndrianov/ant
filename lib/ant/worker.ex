@@ -17,7 +17,8 @@ defmodule Ant.Worker do
   throws, exits and running past the timeout. A failed attempt is retried while
   the worker has attempts left, and marked as `:failed` afterwards.
 
-  Options accepted by `use Ant.Worker` and, per job, by `perform_async/2`:
+  Options accepted by `use Ant.Worker` and, per job, by `perform_async/2` and
+  `build/2`:
 
     * `:queue` - the queue that runs the job. Defaults to the first configured
       queue.
@@ -25,16 +26,18 @@ defmodule Ant.Worker do
     * `:timeout` - how long a single attempt may take, in milliseconds.
       Defaults to `:infinity`.
     * `:unique` - prevents duplicate jobs, see `Ant.WorkerUniquenessChecker`.
+    * `:schedule_in` - per job only: how long to wait before running the job,
+      in milliseconds. A non-negative integer; `0` runs it right away.
+    * `:schedule_at` - per job only: when to run the job, as a `DateTime`,
+      normalized to UTC. A time in the past runs it right away. Cannot be
+      combined with `:schedule_in`.
 
-  Per-job options accepted by `perform_async/2` and `build/2` also include
-  `:schedule_in` (a non-negative delay in milliseconds) or `:schedule_at`
-  (a `DateTime`, normalized to UTC). They cannot be combined. Future jobs wait
-  in `:scheduled` without consuming attempts; zero delays and past timestamps
-  are immediately eligible. Execution can be later because of queue polling
-  and capacity. Invalid scheduling options return `{:error, {:invalid_schedule,
-  reason}}` from `perform_async/2`, or raise `ArgumentError` from `build/2`.
-  A job that has not started running can be cancelled with
-  `Ant.Workers.cancel_worker/1`.
+  A job scheduled for later waits in the `:scheduled` status without using any
+  of its attempts, and may start later than asked, depending on how often its
+  queue checks for work and how busy it is. A job that has not started running
+  can be cancelled with `Ant.Workers.cancel_worker/1`. Invalid scheduling
+  options make `perform_async/2` return `{:error, {:invalid_schedule, reason}}`
+  and `build/2` raise `ArgumentError`.
 
   The delay before a retry defaults to ten seconds times the number of attempts
   made, and can be replaced by implementing the optional `calculate_delay/1`

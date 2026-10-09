@@ -1,6 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [1.1.0]
+
+Delayed jobs: a job can be scheduled to run later, and cancelled until it starts.
 
 ### Added
 

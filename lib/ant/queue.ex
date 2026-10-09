@@ -73,6 +73,10 @@ defmodule Ant.Queue do
       # or nil when the next check has to look them up.
       #
       scheduled_lookup_at: nil,
+      # Whether the next check should come right away, because a slot was left
+      # free during this one.
+      #
+      check_again: false,
       timer_ref: nil
     }
 
@@ -243,6 +247,9 @@ defmodule Ant.Queue do
     Workers.list_enqueued_workers(%{queue_name: queue_name}, DateTime.utc_now(), limit: limit)
   end
 
+  defp schedule_check(%{check_again: true} = state),
+    do: schedule_check(%{state | check_again: false}, 0)
+
   defp schedule_check(state), do: schedule_check(state, next_check_in(state))
 
   defp schedule_check(state, check_interval) do
@@ -294,10 +301,20 @@ defmodule Ant.Queue do
       {:ok, running_worker} ->
         start_worker(worker, running_worker, state)
 
-      # Changed (e.g. cancelled) or deleted since it was listed: it must not run.
+      # Changed (e.g. cancelled) or deleted since it was listed, so it must not
+      # run. Its share of the limit has gone unused, though: the next check
+      # comes right away to fill the slot, rather than a check interval later.
       #
-      {:error, _reason} ->
-        state
+      {:error, reason} when reason in [:changed, :not_found] ->
+        %{state | check_again: true}
+
+      {:error, reason} ->
+        Logger.error(
+          "#{inspect(worker.worker_module)} (worker ##{worker.id}) could not be marked as " <>
+            "running: #{inspect(reason)}. It is left in the #{worker.status} status."
+        )
+
+        keep_if_recovered(worker, state)
     end
   end
 
@@ -321,16 +338,27 @@ defmodule Ant.Queue do
             "#{inspect(error)}. The worker is returned to the #{worker.status} status."
         )
 
-        {:ok, _worker} = Workers.update_worker(worker.id, %{status: worker.status})
-
-        # A worker recovered as stuck is not in a status the periodic check looks at,
-        # so it has to be kept in the state to be retried on the next check.
-        #
-        if worker.status == :running,
-          do: %{state | stuck_workers: [worker | state.stuck_workers]},
-          else: state
+        return_worker(worker, state)
     end
   end
+
+  # A worker that could not be started goes back to the status it was listed
+  # with, to be picked up again - unless it has been deleted in the meantime.
+  #
+  defp return_worker(worker, state) do
+    case Workers.update_worker(worker.id, %{status: worker.status}) do
+      {:ok, _worker} -> keep_if_recovered(worker, state)
+      {:error, :not_found} -> state
+    end
+  end
+
+  # A worker recovered as stuck is not in a status the periodic check looks at,
+  # so it has to be kept in the state to be retried on the next check.
+  #
+  defp keep_if_recovered(%{status: :running} = worker, state),
+    do: %{state | stuck_workers: [worker | state.stuck_workers]}
+
+  defp keep_if_recovered(_worker, state), do: state
 
   # A worker process that terminates abnormally never gets to record the failure
   # itself, which would leave the job in the :running status until the next

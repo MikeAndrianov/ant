@@ -244,7 +244,7 @@ defmodule Ant.WorkersTest do
   end
 
   describe "list_worker_timestamps/0" do
-    test "returns only the id, status and timestamps of every worker" do
+    test "returns only the id and the timestamps of every worker" do
       workers = create_test_workers(3)
 
       assert {:ok, result} = Workers.list_worker_timestamps()
@@ -259,7 +259,7 @@ defmodule Ant.WorkersTest do
       #
       assert Enum.all?(
                result,
-               &(&1 |> Map.keys() |> Enum.sort() == [:id, :scheduled_at, :status, :updated_at])
+               &(&1 |> Map.keys() |> Enum.sort() == [:id, :scheduled_at, :updated_at])
              )
 
       assert Enum.all?(result, & &1.updated_at)
@@ -354,6 +354,41 @@ defmodule Ant.WorkersTest do
       end)
 
       assert {:ok, _created_worker} = Workers.create_worker(worker)
+    end
+  end
+
+  describe "mark_running/1" do
+    test "marks a worker that is as it was listed as running" do
+      [worker] = create_test_workers(1, status: :scheduled)
+
+      assert {:ok, %{status: :running}} = Workers.mark_running(worker)
+    end
+
+    test "leaves a worker whose status changed since it was listed" do
+      [worker] = create_test_workers(1, status: :scheduled)
+      {:ok, cancelled} = Workers.cancel_worker(worker)
+
+      assert Workers.mark_running(worker) == {:error, :changed}
+      assert {:ok, ^cancelled} = Workers.get_worker(worker.id)
+    end
+
+    test "leaves a worker whose due time changed since it was listed" do
+      # A retrying worker that ran and failed again since it was listed is back
+      # in the same status, but with a later time.
+      #
+      [worker] = create_test_workers(1, status: :retrying)
+      later = DateTime.add(DateTime.utc_now(), 60, :second)
+      {:ok, retried} = Workers.update_worker(worker.id, %{scheduled_at: later})
+
+      assert Workers.mark_running(worker) == {:error, :changed}
+      assert {:ok, ^retried} = Workers.get_worker(worker.id)
+    end
+
+    test "returns an error for a worker deleted since it was listed" do
+      [worker] = create_test_workers(1)
+      :ok = Workers.delete_worker(worker)
+
+      assert Workers.mark_running(worker) == {:error, :not_found}
     end
   end
 

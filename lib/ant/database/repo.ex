@@ -42,6 +42,19 @@ defmodule Ant.Repo do
     Ant.Database.Adapters.Mnesia.delete(db_table, id)
   end
 
+  # Decides what happens to a record and does it under one lock: `fun` gets the
+  # current record and returns `{:update, params}`, `:unchanged`, `:delete` or
+  # `{:error, reason}`. See Ant.Database.Adapters.Mnesia.change/3.
+  #
+  def change(db_table, id, fun) do
+    db_table
+    |> Ant.Database.Adapters.Mnesia.change(id, &fun.(to_struct(db_table, &1)))
+    |> case do
+      {:ok, record} -> {:ok, to_struct(db_table, record)}
+      other -> other
+    end
+  end
+
   # Runs `fun` in a transaction and returns what it returned.
   #
   def transaction(fun), do: Ant.Database.Adapters.Mnesia.transaction(fun)

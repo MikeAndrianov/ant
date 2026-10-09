@@ -3,6 +3,8 @@ defmodule Ant.DatabaseCleanerTest do
   use MnesiaTesting
   use Mimic
 
+  import ExUnit.CaptureLog
+
   alias Ant.Repo
   alias Ant.Workers
 
@@ -85,6 +87,63 @@ defmodule Ant.DatabaseCleanerTest do
     assert {:error, :not_found} = Workers.get_worker(second.id)
   end
 
+  test "a worker that can not be removed does not stop cleanup" do
+    workers = for status <- [:failed, :completed], do: insert_worker(status, @old)
+
+    expect(Repo, :change, fn _table, _id, _fun -> {:error, {:transaction_aborted, :test}} end)
+
+    assert {:error, [{failed_id, {:transaction_aborted, :test}}]} =
+             Workers.delete_expired_workers(@cutoff)
+
+    for worker <- workers do
+      if worker.id == failed_id,
+        do: assert({:ok, ^worker} = Workers.get_worker(worker.id)),
+        else: assert({:error, :not_found} = Workers.get_worker(worker.id))
+    end
+  end
+
+  test "logs the workers it could not remove" do
+    insert_worker(:failed, DateTime.add(DateTime.utc_now(), -86_400, :second))
+
+    expect(Repo, :change, fn _table, _id, _fun -> {:error, {:transaction_aborted, :test}} end)
+
+    log =
+      capture_log(fn ->
+        Ant.DatabaseCleaner.handle_info(:cleanup, %{ttl: 60_000, interval: 0})
+      end)
+
+    assert log =~ "could not remove 1 expired worker(s)"
+    assert log =~ ":transaction_aborted"
+  end
+
+  test "a float TTL is rounded to whole milliseconds" do
+    # Computing the cutoff with a float used to raise on every cleanup.
+    #
+    put_ttl(1.5 * 60_000)
+
+    assert {:ok, %{ttl: 90_000} = state} = Ant.DatabaseCleaner.init([])
+
+    old = DateTime.add(DateTime.utc_now(), -86_400, :second)
+    terminal = insert_worker(:completed, old)
+
+    assert {:noreply, _state} = Ant.DatabaseCleaner.handle_info(:cleanup, state)
+    assert {:error, :not_found} = Workers.get_worker(terminal.id)
+  end
+
+  test "a TTL too long for any job to expire disables the cleaner" do
+    put_ttl(999_999_999_999_999)
+
+    assert :ignore = Ant.DatabaseCleaner.init([])
+  end
+
+  for ttl <- ["2 weeks", 0, -1] do
+    test "fails on start with a TTL of #{inspect(ttl)}" do
+      put_ttl(unquote(ttl))
+
+      assert_raise ArgumentError, ~r/Invalid :ttl/, fn -> Ant.DatabaseCleaner.init([]) end
+    end
+  end
+
   test "cleanup uses the configured TTL and preserves overdue jobs" do
     old = DateTime.add(DateTime.utc_now(), -86_400, :second)
     active = insert_worker(:scheduled, old, old)
@@ -110,6 +169,17 @@ defmodule Ant.DatabaseCleanerTest do
     end)
 
     assert :ignore = Ant.DatabaseCleaner.init([])
+  end
+
+  defp put_ttl(ttl) do
+    previous = Application.get_env(:ant, :database)
+    Application.put_env(:ant, :database, ttl: ttl)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:ant, :database, previous),
+        else: Application.delete_env(:ant, :database)
+    end)
   end
 
   defp insert_worker(status, updated_at, scheduled_at \\ nil) do

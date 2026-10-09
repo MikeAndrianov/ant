@@ -174,6 +174,52 @@ defmodule Ant.QueueTest do
       assert Process.alive?(queue)
       assert processing_worker_ids(queue) == [enqueued_id]
     end
+
+    test "fills a slot left free by a skipped worker without waiting for the next check" do
+      # The cancelled worker took the only slot's share of the limit, so no
+      # enqueued worker was listed alongside it.
+      #
+      queue_name = "slot_left_by_skipped_worker"
+      past = DateTime.add(DateTime.utc_now(), -60, :second)
+      scheduled = create_worker(queue_name, %{status: :scheduled, scheduled_at: past})
+      enqueued = create_worker(queue_name)
+
+      after_listing_scheduled(fn ->
+        {:ok, %{status: :cancelled}} = Ant.Workers.cancel_worker(scheduled)
+      end)
+
+      start_queue(queue_name, concurrency: 1)
+
+      enqueued_id = enqueued.id
+      assert_receive {:started, ^enqueued_id, _pid}, 1_000
+    end
+
+    test "does not start a retrying worker again when it changed since it was recovered" do
+      # Workers recovered on start are kept in the queue's state until a slot is
+      # free. The first one is cancelled, so its slot goes to the second, which
+      # is due as well: it runs, fails, and is retrying again - a minute later.
+      # Its recovered copy must not start it ahead of that.
+      #
+      queue_name = "changed_since_recovered"
+      past = DateTime.add(DateTime.utc_now(), -60, :second)
+      attrs = %{status: :retrying, scheduled_at: past, attempts: 1}
+      [first, second] = for _ <- 1..2, do: create_worker(queue_name, attrs)
+
+      expect(Ant.Workers, :list_retrying_workers, fn clauses, date_time ->
+        result = Mimic.call_original(Ant.Workers, :list_retrying_workers, [clauses, date_time])
+        {:ok, %{status: :cancelled}} = Ant.Workers.cancel_worker(first)
+        result
+      end)
+
+      start_queue(queue_name, concurrency: 1)
+
+      second_id = second.id
+      assert_receive {:started, ^second_id, pid}, 1_000
+      finish(pid, :error)
+
+      refute_receive {:started, _id, _pid}, 300
+      assert worker_status(second_id) == :retrying
+    end
   end
 
   describe "looking up scheduled workers" do
@@ -208,20 +254,29 @@ defmodule Ant.QueueTest do
       refute_receive :scheduled_lookup, 300
     end
 
-    test "a busy queue still runs a scheduled worker within the check interval" do
+    test "a busy queue runs a scheduled worker soon after it is due, not after its backlog" do
       queue_name = "scheduled_due_while_busy"
-      enqueued_ids = for _ <- 1..30, do: create_worker(queue_name).id
+      check_interval = 100
+      for _ <- 1..60, do: create_worker(queue_name)
+
+      # Read before the due time, so that the measured wait is never shorter
+      # than the real one.
+      #
+      due_at_monotonic = System.monotonic_time(:millisecond) + 50
       due_at = DateTime.add(DateTime.utc_now(), 50, :millisecond)
       scheduled = create_worker(queue_name, %{status: :scheduled, scheduled_at: due_at})
 
-      start_queue(queue_name, concurrency: 1, check_interval: 100)
+      start_queue(queue_name, concurrency: 1, check_interval: check_interval)
 
-      # Every enqueued worker takes ~10ms, so the queue stays busy for longer
-      # than the scheduled worker may wait.
+      # Every enqueued worker takes ~10ms, so the backlog keeps the queue busy
+      # for over 600ms. The scheduled worker waits for the next lookup, at most
+      # a check interval away, and for the running worker to free the only slot
+      # - which, on a loaded machine, takes much longer than 10ms.
       #
-      started = run_until_started(scheduled.id)
+      run_until_started(scheduled.id)
+      waited = System.monotonic_time(:millisecond) - due_at_monotonic
 
-      assert length(started) < length(enqueued_ids)
+      assert waited < 3 * check_interval
     end
 
     test "they are looked up again while they fill every free slot" do
@@ -462,6 +517,26 @@ defmodule Ant.QueueTest do
       assert wait_until(fn -> worker_status(worker.id) == :enqueued end)
       assert Process.alive?(queue)
       assert processing_worker_ids(queue) == []
+    end
+
+    test "keeps running when a worker that can not be started is deleted meanwhile" do
+      Mimic.copy(DynamicSupervisor)
+      set_mimic_global(%{})
+
+      queue_name = "unstartable_deleted_worker"
+      worker = create_worker(queue_name)
+
+      stub(DynamicSupervisor, :start_child, fn _supervisor, _child_spec ->
+        Ant.Workers.delete_worker(worker)
+
+        {:error, :max_children}
+      end)
+
+      queue = start_queue(queue_name, concurrency: 1, check_interval: 20)
+
+      assert wait_until(fn -> Repo.get(:ant_workers, worker.id) == {:error, :not_found} end)
+      refute_receive {:EXIT, ^queue, _reason}, 100
+      assert Process.alive?(queue)
     end
   end
 

@@ -233,7 +233,9 @@ This keeps delayed jobs safe while they wait for execution. Expired terminal job
 are removed on the next cleanup pass, which runs hourly (or every `ttl`
 milliseconds when the TTL is shorter than an hour).
 
-For storing data about workers indefinitely, set `ttl` to `:infinity`:
+The TTL must be a positive number of milliseconds, or `:infinity`; anything
+else fails when Ant starts. For storing data about workers indefinitely, set `ttl`
+to `:infinity`:
 
 ```elixir
 config :ant,

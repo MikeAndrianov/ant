@@ -75,41 +75,26 @@ defmodule Ant.Workers do
   # job is cancelled before its queue gets to it, or it is already running.
   #
   def cancel_worker(id) do
-    Repo.transaction(fn ->
-      :ok = Repo.lock(:ant_workers, id)
-
-      case get_worker(id) do
-        {:ok, %{status: status}} when status in @cancellable_statuses ->
-          update_worker(id, %{status: :cancelled})
-
-        {:ok, %{status: :cancelled} = worker} ->
-          {:ok, worker}
-
-        {:ok, %{status: status}} ->
-          {:error, {:not_cancellable, status}}
-
-        error ->
-          error
-      end
+    Repo.change(:ant_workers, id, fn
+      %{status: status} when status in @cancellable_statuses -> {:update, %{status: :cancelled}}
+      %{status: :cancelled} -> :unchanged
+      %{status: status} -> {:error, {:not_cancellable, status}}
     end)
   end
 
-  # A queue lists the workers to start, then marks each one as running. Marking
-  # it unconditionally ran workers cancelled in between, and failed on (and
-  # crashed the queue over) the ones deleted in between. So the status is only
-  # changed while it is still the one the worker was listed with.
+  # A queue lists the workers to start, then marks each one as running, and a
+  # worker can change in between: be cancelled, be deleted, or fail and be
+  # retried later. Marking it unconditionally ran it anyway - ahead of its retry
+  # delay, for a worker recovered on start - or crashed the queue over a deleted
+  # one. So it is only marked while its status and due time are still the ones
+  # it was listed with.
   #
   @doc false
   @spec mark_running(Ant.Worker.t()) :: {:ok, Ant.Worker.t()} | {:error, any()}
-  def mark_running(%{id: id, status: status}) do
-    Repo.transaction(fn ->
-      :ok = Repo.lock(:ant_workers, id)
-
-      case get_worker(id) do
-        {:ok, %{status: ^status}} -> update_worker(id, %{status: :running})
-        {:ok, %{status: current_status}} -> {:error, {:status_changed, current_status}}
-        error -> error
-      end
+  def mark_running(%{id: id, status: status, scheduled_at: scheduled_at}) do
+    Repo.change(:ant_workers, id, fn
+      %{status: ^status, scheduled_at: ^scheduled_at} -> {:update, %{status: :running}}
+      _changed -> {:error, :changed}
     end)
   end
 
@@ -153,44 +138,55 @@ defmodule Ant.Workers do
     end
   end
 
-  # Only the columns needed to decide whether a worker can be removed, so a
-  # cleanup pass does not have to load every job's args and stack traces.
+  # Only the id and the timestamps, without loading every job's args and stack
+  # traces.
   #
   @spec list_worker_timestamps() :: {:ok, [map()]}
   def list_worker_timestamps,
-    do: {:ok, Repo.select_columns(:ant_workers, %{}, [:id, :status, :updated_at, :scheduled_at])}
+    do: {:ok, Repo.select_columns(:ant_workers, %{}, [:id, :updated_at, :scheduled_at])}
 
+  # Removes the finished workers last updated before `cutoff`. Returns `:ok`, or
+  # `{:error, failures}` with the `{id, reason}` of every worker that could not
+  # be removed: one failure used to end the whole pass, leaving every worker
+  # after it for the next one - and with the same worker failing every time,
+  # retention never got past it.
+  #
   @doc false
-  @spec delete_expired_workers(DateTime.t()) :: :ok | {:error, any()}
+  @spec delete_expired_workers(DateTime.t()) :: :ok | {:error, [{integer(), any()}]}
   def delete_expired_workers(cutoff) do
-    {:ok, workers} = list_worker_timestamps()
+    failures =
+      cutoff
+      |> list_expired_worker_ids()
+      |> Enum.flat_map(fn id ->
+        case delete_expired_worker(id, cutoff) do
+          :ok -> []
+          {:error, reason} -> [{id, reason}]
+        end
+      end)
 
-    workers
-    |> Enum.filter(&expired?(&1, cutoff))
-    |> Enum.reduce_while(:ok, fn worker, :ok ->
-      case delete_expired_worker(worker.id, cutoff) do
-        :ok -> {:cont, :ok}
-        error -> {:halt, error}
-      end
-    end)
+    if failures == [], do: :ok, else: {:error, failures}
   end
 
-  # The scan above is only a list of candidates. Lock and reread before deleting:
-  # a job may have been rescheduled or updated since the scan, or already deleted.
+  # Only the columns needed to tell whether a worker has expired, so a cleanup
+  # pass does not have to load every job's args and stack traces.
+  #
+  defp list_expired_worker_ids(cutoff) do
+    for worker <- Repo.select_columns(:ant_workers, %{}, [:id, :status, :updated_at]),
+        expired?(worker, cutoff),
+        do: worker.id
+  end
+
+  # The scan above is only a list of candidates: a worker may have been changed
+  # since, or already deleted. So it is checked again, under a lock, before it
+  # is removed.
   #
   defp delete_expired_worker(id, cutoff) do
-    Repo.transaction(fn ->
-      :ok = Repo.lock(:ant_workers, id)
-      id |> get_worker() |> delete_if_expired(cutoff)
-    end)
+    case Repo.change(:ant_workers, id, &if(expired?(&1, cutoff), do: :delete, else: :unchanged)) do
+      {:ok, _unchanged_worker} -> :ok
+      {:error, :not_found} -> :ok
+      result -> result
+    end
   end
-
-  defp delete_if_expired({:ok, worker}, cutoff) do
-    if expired?(worker, cutoff), do: delete_worker(worker), else: :ok
-  end
-
-  defp delete_if_expired({:error, :not_found}, _cutoff), do: :ok
-  defp delete_if_expired(error, _cutoff), do: error
 
   defp expired?(worker, cutoff) do
     worker.status in @terminal_statuses and DateTime.compare(worker.updated_at, cutoff) == :lt

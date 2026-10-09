@@ -10,11 +10,12 @@
 ### Changed
 
 - Queues look for due scheduled jobs once per `check_interval`, rather than every time one of their jobs finishes: finding them means reading every scheduled job, which slowed busy queues down by more than ten times with 10,000 delayed jobs
+- A `ttl` that is not a positive number of milliseconds or `:infinity` fails when Ant starts, instead of breaking every cleanup; a float is rounded
 
 ### Fixed
 
-- Retention cleanup only removes expired completed, failed or cancelled jobs, preserving active jobs even when overdue; eligibility is rechecked under a transaction lock before deletion
-- Jobs changed or deleted between a queue listing and starting them: a cancelled job could still run, and a deleted one crashed the queue along with every job it was running
+- Retention cleanup only removes expired completed, failed or cancelled jobs, preserving active jobs even when overdue; eligibility is rechecked under a transaction lock before deletion, and jobs that can't be removed are logged and tried again on the next pass
+- Jobs changed or deleted between a queue listing and starting them: a cancelled job could still run, a job retried in the meantime could start again ahead of its retry delay, and a deleted one crashed the queue along with every job it was running
 
 ## [1.0.0]
 

@@ -85,9 +85,11 @@ defmodule Ant.Worker do
   @default_timeout :infinity
 
   defmacro __using__(opts) do
-    max_attempts = Keyword.get(opts, :max_attempts, @default_max_attempts)
-    timeout = Keyword.get(opts, :timeout, @default_timeout)
-    unique = Keyword.get(opts, :unique, [])
+    defaults = [
+      max_attempts: Keyword.get(opts, :max_attempts, @default_max_attempts),
+      timeout: Keyword.get(opts, :timeout, @default_timeout),
+      unique: Keyword.get(opts, :unique, [])
+    ]
 
     # Resolved here rather than with `queue_name || default_queue_name()` in the
     # generated code, where a queue given as a literal makes the check dead.
@@ -104,39 +106,40 @@ defmodule Ant.Worker do
       @spec perform_async(args :: map(), opts :: keyword()) ::
               {:ok, Ant.Worker.t()} | {:error, any()}
       def perform_async(args, opts \\ []) do
-        with {:ok, worker} <- ant_build_worker(args, opts) do
+        with {:ok, worker} <-
+               Ant.Worker.new(__MODULE__, unquote(queue_name), args, opts, unquote(defaults)) do
           Workers.create_worker(worker)
         end
       end
 
       def build(args, opts \\ []) do
-        case ant_build_worker(args, opts) do
+        case Ant.Worker.new(__MODULE__, unquote(queue_name), args, opts, unquote(defaults)) do
           {:ok, worker} -> worker
           {:error, {:invalid_schedule, reason}} -> raise ArgumentError, reason
         end
       end
+    end
+  end
 
-      defp ant_build_worker(args, opts) do
-        opts =
-          opts
-          |> Keyword.put_new(:max_attempts, unquote(max_attempts))
-          |> Keyword.put_new(:timeout, unquote(timeout))
-          |> Keyword.put_new(:unique, unquote(unique))
+  @doc false
+  @spec new(module(), atom() | String.t(), map(), keyword(), keyword()) ::
+          {:ok, t()} | {:error, {:invalid_schedule, String.t()}}
+  def new(worker_module, queue_name, args, opts, defaults) do
+    opts =
+      Enum.reduce(defaults, opts, fn {key, value}, opts -> Keyword.put_new(opts, key, value) end)
 
-        with {:ok, status, scheduled_at} <- Ant.Worker.schedule(opts) do
-          {:ok,
-           %Ant.Worker{
-             worker_module: __MODULE__,
-             args: args,
-             queue_name: unquote(queue_name),
-             status: status,
-             attempts: 0,
-             scheduled_at: scheduled_at,
-             errors: [],
-             opts: opts
-           }}
-        end
-      end
+    with {:ok, status, scheduled_at} <- schedule(opts) do
+      {:ok,
+       %Ant.Worker{
+         worker_module: worker_module,
+         args: args,
+         queue_name: queue_name,
+         status: status,
+         attempts: 0,
+         scheduled_at: scheduled_at,
+         errors: [],
+         opts: opts
+       }}
     end
   end
 

@@ -38,9 +38,9 @@ Create a job to be processed asynchronously:
 
 Note that the function to create a job is named `perform_async` and not `perform`. It returns a tuple with `:ok` and a worker struct.
 
-### Delayed jobs
+### Scheduling jobs
 
-Schedule a job without running it or recording a failed attempt first:
+To schedule a job that will be executed in the future:
 
 ```elixir
 {:ok, worker} = SupplierReminderWorker.perform_async(
@@ -57,14 +57,10 @@ SupplierReminderWorker.perform_async(
 
 `schedule_in` is a non-negative integer in **milliseconds**, consistent with Ant's
 timeout and retry delay options. `schedule_at` accepts a timezone-aware `DateTime`
-and normalizes it to UTC. Use only one of these options per job; both are also
-accepted by `build/2`. They are per-job options, not `use Ant.Worker` defaults.
+and normalizes it to UTC. Use only one of these options per job.
 
-Future jobs have status `:scheduled`, zero attempts and no errors until they run.
+Future jobs have status `:scheduled`.
 A zero delay or a timestamp in the past makes the job immediately eligible.
-Without either option, `perform_async/2` behaves as before. Invalid scheduling
-options return `{:error, {:invalid_schedule, reason}}`; `build/2` raises
-`ArgumentError` instead.
 
 The timestamp is the earliest the job may run. Queue polling (every five seconds
 by default) and available capacity can delay execution. Once the job runs, its
